@@ -17,14 +17,10 @@ import android.provider.ContactsContract
 import android.provider.Settings
 import android.widget.Toast
 import androidx.annotation.RequiresApi
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.core.graphics.drawable.toBitmap
 import com.hari.ftqr.model.ScanContent
 import com.hari.ftqr.model.WifiSecurity
 import java.math.BigDecimal
 
-data class PaymentApp(val label: String, val packageName: String, val activityName: String, val icon: ImageBitmap)
 
 object Actions {
 
@@ -177,7 +173,7 @@ object Actions {
         }.getOrNull()
     }
 
-    fun paymentApps(context: Context, upiUri: String, iconSizePx: Int): List<PaymentApp> {
+    fun hasPaymentApp(context: Context, upiUri: String): Boolean {
         val pm = context.packageManager
         val intent = Intent(Intent.ACTION_VIEW, Uri.parse(upiUri))
         val matches = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -186,24 +182,7 @@ object Actions {
             @Suppress("DEPRECATION")
             pm.queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY)
         }
-        val size = iconSizePx.coerceAtLeast(1)
-        return matches
-            .filter { it.activityInfo.packageName != context.packageName }
-            .distinctBy { it.activityInfo.packageName }
-            .map {
-                PaymentApp(
-                    label = it.loadLabel(pm).toString(),
-                    packageName = it.activityInfo.packageName,
-                    activityName = it.activityInfo.name,
-                    icon = it.loadIcon(pm).toBitmap(size, size).asImageBitmap(),
-                )
-            }
-            .sortedBy { it.label.lowercase() }
-    }
-
-    fun payWith(context: Context, upiUri: String, app: PaymentApp) {
-        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(upiUri)).setClassName(app.packageName, app.activityName)
-        launch(context, intent)
+        return matches.any { it.activityInfo.packageName != context.packageName }
     }
 
     fun payWithChooser(context: Context, upiUri: String) {

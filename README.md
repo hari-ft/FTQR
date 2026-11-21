@@ -19,7 +19,7 @@ Everything runs on the phone. FTQR has no account and no backend, and it doesn't
 | Type | Shows | Actions |
 |---|---|---|
 | Link | Domain in large type, full URL, safety warnings | Open (asks to confirm if there are warnings), copy, share |
-| UPI payment | Payee name, UPI ID, amount, note | Pay with one of the UPI apps installed on the phone (GPay, PhonePe, Paytm, BHIM…), choose app, copy UPI ID |
+| UPI payment | Payee name, UPI ID, amount, note | Choose app (Android's picker lists the installed UPI apps: GPay, PhonePe, Paytm, BHIM…), copy UPI ID |
 | Wi-Fi | Network name, security type, password (hidden until tapped) | Connect, copy password |
 | Contact (vCard / MECARD) | Name, organisation, phones, emails, address | Save contact, call, email |
 | Phone | Number | Call, message, save |
@@ -129,7 +129,7 @@ Unit tests for the parsers are in `app/src/test/java/com/hari/ftqr/parse/`. They
 | `VIBRATE` | The short vibration when a code is found |
 | `WRITE_EXTERNAL_STORAGE` (Android 8–9 only) | Saving a created QR code to the gallery |
 
-The manifest also declares `<queries>` for the `upi` scheme, so the app can list the UPI apps installed on the phone.
+The manifest also declares `<queries>` for the `upi` scheme, so the app can check whether a UPI app is installed on the phone.
 
 ## Artwork
 

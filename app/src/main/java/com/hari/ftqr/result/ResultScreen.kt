@@ -301,15 +301,14 @@ private fun SafetyCard(assessment: LinkAssessment) {
 @Composable
 private fun PaymentDetails(payment: ScanContent.Payment) {
     val context = LocalContext.current
-    val iconPx = with(LocalDensity.current) { 48.dp.roundToPx() }
     var refresh by remember { mutableIntStateOf(0) }
-    val apps by produceState<List<PaymentApp>?>(null, payment.upiUri, iconPx, refresh) {
+    val hasApp by produceState<Boolean?>(null, payment.upiUri, refresh) {
         value = withContext(Dispatchers.IO) {
-            runCatching { Actions.paymentApps(context, payment.upiUri, iconPx) }.getOrDefault(emptyList())
+            runCatching { Actions.hasPaymentApp(context, payment.upiUri) }.getOrDefault(true)
         }
     }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
-        if (apps != null) refresh++
+        if (hasApp != null) refresh++
     }
     val canPay = payment.amountValid
     if (payment.isMandate) {
@@ -358,62 +357,30 @@ private fun PaymentDetails(payment: ScanContent.Payment) {
             )
         }
     }
-    val installed = apps
-    if (canPay) {
-        when {
-            installed == null -> Row(verticalAlignment = Alignment.CenterVertically) {
-                CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                Spacer(Modifier.width(12.dp))
-                Text(
-                    "Finding payment apps…",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            installed.isEmpty() -> Text(
-                "No UPI payment apps are installed on this phone.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.error,
-            )
-            else -> {
-                Text(if (payment.isMandate) "Set up with" else "Pay with", style = MaterialTheme.typography.titleMedium)
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    installed.forEach { app ->
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            modifier = Modifier
-                                .width(76.dp)
-                                .clickable { Actions.payWith(context, payment.upiUri, app) }
-                                .padding(4.dp),
-                        ) {
-                            Image(app.icon, contentDescription = null, modifier = Modifier.size(48.dp))
-                            Text(
-                                app.label,
-                                style = MaterialTheme.typography.labelSmall,
-                                textAlign = TextAlign.Center,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                    }
-                }
-                Text(
-                    "If your payment app declines, open it and scan the QR from there, or copy the UPI ID.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
+    val showChooser = canPay && hasApp == true
+    if (canPay && hasApp == false) {
+        Text(
+            "No UPI payment apps are installed on this phone.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.error,
+        )
     }
     ActionRow {
+        if (showChooser) {
+            Button(onClick = { Actions.payWithChooser(context, payment.upiUri) }) {
+                ButtonContent(Icons.Outlined.Payments, if (payment.isMandate) "Choose app to set up" else "Choose app")
+            }
+        }
         FilledTonalButton(onClick = { Actions.copy(context, "UPI ID", payment.payeeAddress) }) {
             ButtonContent(Icons.Outlined.ContentCopy, "Copy UPI ID")
         }
-        if (canPay && !installed.isNullOrEmpty()) {
-            OutlinedButton(onClick = { Actions.payWithChooser(context, payment.upiUri) }) {
-                ButtonContent(Icons.Outlined.Payments, "Choose app")
-            }
-        }
+    }
+    if (showChooser) {
+        Text(
+            "If your payment app declines, open it and scan the QR from there, or copy the UPI ID.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
