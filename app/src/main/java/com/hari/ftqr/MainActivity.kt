@@ -12,6 +12,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.platform.LocalContext
 import com.hari.ftqr.data.ScanRepository
@@ -65,43 +66,49 @@ private fun FtqrApp() {
     val context = LocalContext.current
     val repository = remember { ScanRepository.from(context) }
     val scope = rememberCoroutineScope()
+    val holder = rememberSaveableStateHolder()
     val backStack = rememberSaveable(saver = BackStackSaver) { mutableStateListOf<Route>(Route.Scanner) }
 
     fun push(route: Route) {
-        backStack.add(route)
+        if (backStack.last() != route) backStack.add(route)
     }
 
-    fun pop() {
-        if (backStack.size > 1) backStack.removeAt(backStack.lastIndex)
+    fun pop(expected: Route): Boolean {
+        if (backStack.size <= 1 || backStack.last() != expected) return false
+        backStack.removeAt(backStack.lastIndex)
+        if (expected !in backStack) holder.removeState(expected.encode())
+        return true
     }
 
-    BackHandler(enabled = backStack.size > 1) { pop() }
+    BackHandler(enabled = backStack.size > 1) { pop(backStack.last()) }
 
-    when (val route = backStack.last()) {
-        Route.Scanner -> ScannerScreen(
-            onScanned = { raw, format ->
-                scope.launch {
-                    val id = repository.record(raw, format)
-                    if (backStack.last() == Route.Scanner) push(Route.Result(id))
-                }
-            },
-            onOpenHistory = { push(Route.History) },
-            onOpenGenerator = { push(Route.Generator) },
-        )
-        Route.History -> HistoryScreen(
-            repository = repository,
-            onBack = ::pop,
-            onOpen = { push(Route.Result(it)) },
-        )
-        Route.Generator -> GeneratorScreen(onBack = ::pop)
-        is Route.Result -> ResultScreen(
-            scanId = route.scanId,
-            repository = repository,
-            onBack = ::pop,
-            onDelete = { scan ->
-                pop()
-                scope.launch { repository.delete(scan.id) }
-            },
-        )
+    val route = backStack.last()
+    holder.SaveableStateProvider(route.encode()) {
+        when (route) {
+            Route.Scanner -> ScannerScreen(
+                onScanned = { raw, format ->
+                    scope.launch {
+                        val id = repository.record(raw, format)
+                        if (backStack.last() == Route.Scanner) push(Route.Result(id))
+                    }
+                },
+                onOpenHistory = { if (backStack.last() == Route.Scanner) push(Route.History) },
+                onOpenGenerator = { if (backStack.last() == Route.Scanner) push(Route.Generator) },
+            )
+            Route.History -> HistoryScreen(
+                repository = repository,
+                onBack = { pop(Route.History) },
+                onOpen = { id -> if (backStack.last() == Route.History) push(Route.Result(id)) },
+            )
+            Route.Generator -> GeneratorScreen(onBack = { pop(Route.Generator) })
+            is Route.Result -> ResultScreen(
+                scanId = route.scanId,
+                repository = repository,
+                onBack = { pop(route) },
+                onDelete = { scan ->
+                    if (pop(route)) scope.launch { repository.delete(scan.id) }
+                },
+            )
+        }
     }
 }

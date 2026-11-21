@@ -1,23 +1,32 @@
 package com.hari.ftqr.generator
 
+import java.math.BigDecimal
 import java.math.RoundingMode
 import java.net.URLEncoder
 
 object QrPayloads {
 
     const val SECURITY_WPA = "WPA"
+    const val SECURITY_WPA3 = "SAE"
     const val SECURITY_WEP = "WEP"
     const val SECURITY_NONE = "nopass"
+
+    private val UPI_MAX_AMOUNT = BigDecimal("100000")
+    private const val UPI_MAX_FRACTION_DIGITS = 2
 
     private val urlSchemeRegex = Regex("^[a-zA-Z][a-zA-Z0-9+.-]*://")
     private val opaqueSchemeRegex = Regex(
         "^(mailto|tel|sms|smsto|mms|geo|market|intent|upi|whatsapp|skype|bitcoin|data):",
         RegexOption.IGNORE_CASE,
     )
+    private val upiIdRegex = Regex("^[A-Za-z0-9._-]{2,256}@[A-Za-z][A-Za-z0-9.-]{1,63}$")
+    private val upiAmountRegex = Regex("^(\\d+(\\.\\d*)?|\\.\\d+)$")
+    private val hexRegex = Regex("^[0-9A-Fa-f]{64}$")
 
     fun wifi(ssid: String, password: String, security: String, hidden: Boolean): String {
         val type = when (security.trim().uppercase()) {
             SECURITY_WPA -> SECURITY_WPA
+            SECURITY_WPA3, "WPA3" -> SECURITY_WPA3
             SECURITY_WEP -> SECURITY_WEP
             else -> SECURITY_NONE
         }
@@ -29,6 +38,9 @@ object QrPayloads {
             append(";;")
         }
     }
+
+    fun isValidWpaPassword(password: String): Boolean =
+        password.length in 8..63 || hexRegex.matches(password)
 
     fun contact(
         name: String,
@@ -50,14 +62,14 @@ object QrPayloads {
             lines += "FN:${escapeVCard(organization.trim())}"
         }
         if (organization.isNotBlank()) lines += "ORG:${escapeVCard(organization.trim())}"
-        if (phone.isNotBlank()) lines += "TEL;TYPE=CELL:${escapeVCard(phone.trim())}"
-        if (email.isNotBlank()) lines += "EMAIL;TYPE=INTERNET:${escapeVCard(email.trim())}"
-        if (website.isNotBlank()) lines += "URL:${escapeVCard(url(website))}"
+        if (phone.isNotBlank()) lines += "TEL;TYPE=CELL:${escapeNewlines(phone.trim())}"
+        if (email.isNotBlank()) lines += "EMAIL;TYPE=INTERNET:${escapeNewlines(email.trim())}"
+        if (website.isNotBlank()) lines += "URL:${escapeNewlines(url(website))}"
         lines += "END:VCARD"
         return lines.joinToString(separator = "\r\n", postfix = "\r\n")
     }
 
-    fun phone(number: String): String = "tel:" + cleanNumber(number)
+    fun phone(number: String): String = "tel:" + cleanNumber(number).replace("#", "%23")
 
     fun email(to: String, subject: String, body: String): String {
         val query = listOf("subject" to subject, "body" to body)
@@ -69,15 +81,38 @@ object QrPayloads {
 
     fun sms(number: String, message: String): String = "SMSTO:${cleanNumber(number)}:$message"
 
+    fun isValidUpiId(vpa: String): Boolean = upiIdRegex.matches(vpa.trim())
+
+    fun filterUpiAmountInput(previous: String, input: String): String {
+        val cleaned = input.filter { it in '0'..'9' || it == '.' }
+        if (cleaned.count { it == '.' } > 1) return previous
+        if (cleaned.substringAfter('.', "").length > UPI_MAX_FRACTION_DIGITS) return previous
+        return cleaned
+    }
+
+    fun upiAmountError(amount: String): String? {
+        val trimmed = amount.trim()
+        if (trimmed.isEmpty()) return null
+        if (!upiAmountRegex.matches(trimmed)) return "Enter a valid amount"
+        if (trimmed.substringAfter('.', "").length > UPI_MAX_FRACTION_DIGITS) return "Max 2 decimal places"
+        val scaled = trimmed.toBigDecimalOrNull()?.setScale(UPI_MAX_FRACTION_DIGITS, RoundingMode.UNNECESSARY)
+            ?: return "Enter a valid amount"
+        if (scaled.signum() <= 0) return "Enter an amount greater than 0"
+        if (scaled > UPI_MAX_AMOUNT) return "UPI limit is ₹1,00,000"
+        return null
+    }
+
+    fun normalizeUpiAmount(amount: String): String? {
+        if (amount.isBlank() || upiAmountError(amount) != null) return null
+        return amount.trim().toBigDecimal().setScale(UPI_MAX_FRACTION_DIGITS, RoundingMode.UNNECESSARY).toPlainString()
+    }
+
     fun upi(vpa: String, name: String, amount: String, note: String): String {
-        val normalizedAmount = amount.trim().toBigDecimalOrNull()
-            ?.setScale(2, RoundingMode.HALF_UP)
-            ?.toPlainString()
-            ?: amount.trim()
+        val normalizedAmount = normalizeUpiAmount(amount)
         val params = mutableListOf<String>()
         if (vpa.isNotBlank()) params += "pa=" + encode(vpa.trim()).replace("%40", "@")
         if (name.isNotBlank()) params += "pn=" + encode(name.trim())
-        if (normalizedAmount.isNotBlank()) params += "am=" + encode(normalizedAmount)
+        if (normalizedAmount != null) params += "am=$normalizedAmount"
         params += "cu=INR"
         if (note.isNotBlank()) params += "tn=" + encode(note.trim())
         return "upi://pay?" + params.joinToString("&")
@@ -96,8 +131,12 @@ object QrPayloads {
     fun encode(value: String): String =
         URLEncoder.encode(value, "UTF-8").replace("+", "%20")
 
-    private fun cleanNumber(number: String): String =
-        number.trim().filter { it.isDigit() || it == '+' }
+    private fun cleanNumber(number: String): String {
+        val trimmed = number.trim()
+        val leadingPlus = trimmed.startsWith("+")
+        val body = trimmed.filter { it in '0'..'9' || it == '*' || it == '#' || it == ',' || it == ';' }
+        return if (leadingPlus) "+$body" else body
+    }
 
     private fun escapeWifi(value: String): String = buildString {
         for (c in value) {
@@ -106,11 +145,15 @@ object QrPayloads {
         }
     }
 
-    private fun escapeVCard(value: String): String = value
-        .replace("\\", "\\\\")
-        .replace(";", "\\;")
-        .replace(",", "\\,")
+    private fun escapeNewlines(value: String): String = value
         .replace("\r\n", "\\n")
         .replace("\n", "\\n")
         .replace("\r", "\\n")
+
+    private fun escapeVCard(value: String): String = escapeNewlines(
+        value
+            .replace("\\", "\\\\")
+            .replace(";", "\\;")
+            .replace(",", "\\,")
+    )
 }

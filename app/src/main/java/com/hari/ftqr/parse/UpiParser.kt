@@ -14,19 +14,23 @@ object UpiParser {
 
     private fun parseOrNull(trimmed: String): ScanContent.Payment? {
         if (!trimmed.startsWith(UPI_SCHEME_PREFIX, ignoreCase = true)) return null
-        val query = trimmed.substringAfter('?', "").substringBefore('#')
-        val params = TextCodec.parseQuery(query, plusAsSpace = true)
-            .mapValues { it.value.trim() }
-            .filterValues { it.isNotEmpty() }
-        val payeeAddress = params["pa"] ?: return null
+        val afterScheme = trimmed.substring(UPI_SCHEME_PREFIX.length)
+        val host = afterScheme.substringBefore('?').substringBefore('#').trimEnd('/').lowercase()
+        val isMandate = UpiUri.hostIsMandate(host) ?: return null
+        val query = afterScheme.substringAfter('?', "").substringBefore('#')
+        val params = UpiUri.parseParameters(query) ?: return null
+        val payeeAddress = params[UpiUri.KEY_PAYEE_ADDRESS] ?: return null
+        val amount = params[UpiUri.KEY_AMOUNT]
         return ScanContent.Payment(
             payeeAddress = payeeAddress,
-            payeeName = params["pn"],
-            amount = params["am"],
-            currency = params["cu"],
-            note = params["tn"],
-            merchantCode = params["mc"],
-            upiUri = trimmed,
+            payeeName = params[UpiUri.KEY_PAYEE_NAME],
+            amount = amount,
+            currency = params[UpiUri.KEY_CURRENCY],
+            note = params[UpiUri.KEY_NOTE],
+            merchantCode = params[UpiUri.KEY_MERCHANT_CODE],
+            upiUri = UpiUri.build(params, isMandate),
+            isMandate = isMandate,
+            amountValid = UpiUri.isValidAmount(amount),
         )
     }
 }

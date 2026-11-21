@@ -1,10 +1,11 @@
 package com.hari.ftqr.result
 
 import android.content.Context
-import android.text.format.DateUtils
+import android.net.Uri
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -43,6 +44,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
@@ -56,7 +58,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -64,6 +68,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import com.hari.ftqr.R
@@ -71,6 +76,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hari.ftqr.data.ScanEntity
 import com.hari.ftqr.data.ScanRepository
@@ -82,14 +89,29 @@ import com.hari.ftqr.parse.LinkSafety
 import com.hari.ftqr.parse.kind
 import com.hari.ftqr.ui.barcodeFormatName
 import com.hari.ftqr.ui.icon
+import com.hari.ftqr.ui.relativeTime
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 import java.text.DateFormat
 import java.util.Date
+import java.util.TimeZone
+
+private sealed interface ScanLoad {
+    data object Loading : ScanLoad
+    data object Missing : ScanLoad
+    data class Found(val scan: ScanEntity) : ScanLoad
+}
+
+private const val DAY_MILLIS = 86_400_000L
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ResultScreen(scanId: Long, repository: ScanRepository, onBack: () -> Unit, onDelete: (ScanEntity) -> Unit) {
-    val scan by remember(scanId) { repository.observeById(scanId) }.collectAsStateWithLifecycle(initialValue = null)
-    val current = scan
+    val load by remember(scanId) {
+        repository.observeById(scanId).map { if (it == null) ScanLoad.Missing else ScanLoad.Found(it) }
+    }.collectAsStateWithLifecycle<ScanLoad>(initialValue = ScanLoad.Loading)
+    val current = (load as? ScanLoad.Found)?.scan
     val content = remember(current?.rawValue, current?.format) {
         current?.let { ContentParser.parse(it.rawValue, it.format) }
     }
@@ -110,6 +132,10 @@ fun ResultScreen(scanId: Long, repository: ScanRepository, onBack: () -> Unit, o
             )
         },
     ) { padding ->
+        if (load == ScanLoad.Missing) {
+            MissingScan(Modifier.fillMaxSize().padding(padding), onBack)
+            return@Scaffold
+        }
         if (current == null || content == null) return@Scaffold
         Column(
             modifier = Modifier
@@ -122,6 +148,20 @@ fun ResultScreen(scanId: Long, repository: ScanRepository, onBack: () -> Unit, o
             Header(current, content)
             ContentDetails(content)
             RawValueCard(current.rawValue)
+        }
+    }
+}
+
+@Composable
+private fun MissingScan(modifier: Modifier, onBack: () -> Unit) {
+    Box(modifier.padding(32.dp), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Text(
+                "This scan was deleted",
+                style = MaterialTheme.typography.titleMedium,
+                textAlign = TextAlign.Center,
+            )
+            Button(onClick = onBack) { Text("Back") }
         }
     }
 }
@@ -150,7 +190,7 @@ private fun Header(scan: ScanEntity, content: ScanContent) {
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                barcodeFormatName(scan.format) + " · " + formatTimestamp(scan.createdAt),
+                barcodeFormatName(scan.format) + " · " + relativeTime(scan.createdAt),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -180,6 +220,8 @@ private fun LinkDetails(link: ScanContent.Link) {
     val context = LocalContext.current
     val assessment = remember(link.url) { LinkSafety.assess(link.url) }
     var confirmOpen by remember { mutableStateOf(false) }
+    val scheme = remember(link.url) { Uri.parse(link.url.trim()).scheme?.lowercase() ?: assessment.scheme }
+    val canOpen = scheme != "file" && scheme != "content"
     DetailCard {
         if (assessment.host.isNotBlank()) {
             Text("Website", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -190,13 +232,22 @@ private fun LinkDetails(link: ScanContent.Link) {
         SelectionContainer { Text(link.url, style = MaterialTheme.typography.bodyMedium) }
     }
     SafetyCard(assessment)
+    if (!canOpen) {
+        Text(
+            "Links to files on a device can't be opened from a QR code. You can copy or share it.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
     ActionRow {
-        Button(onClick = {
-            if (assessment.warnings.isEmpty()) Actions.openUri(context, link.url) else confirmOpen = true
-        }) { ButtonContent(Icons.AutoMirrored.Outlined.OpenInNew, "Open link") }
+        if (canOpen) {
+            Button(onClick = {
+                if (assessment.warnings.isEmpty()) Actions.openUri(context, link.url) else confirmOpen = true
+            }) { ButtonContent(Icons.AutoMirrored.Outlined.OpenInNew, "Open link") }
+        }
         CommonTextActions(context, link.url)
     }
-    if (confirmOpen) {
+    if (confirmOpen && canOpen) {
         AlertDialog(
             onDismissRequest = { confirmOpen = false },
             icon = { Icon(Icons.Outlined.WarningAmber, contentDescription = null) },
@@ -250,12 +301,44 @@ private fun SafetyCard(assessment: LinkAssessment) {
 @Composable
 private fun PaymentDetails(payment: ScanContent.Payment) {
     val context = LocalContext.current
-    val apps = remember(payment.upiUri) { Actions.paymentApps(context, payment.upiUri) }
+    val iconPx = with(LocalDensity.current) { 48.dp.roundToPx() }
+    var refresh by remember { mutableIntStateOf(0) }
+    val apps by produceState<List<PaymentApp>?>(null, payment.upiUri, iconPx, refresh) {
+        value = withContext(Dispatchers.IO) {
+            runCatching { Actions.paymentApps(context, payment.upiUri, iconPx) }.getOrDefault(emptyList())
+        }
+    }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        if (apps != null) refresh++
+    }
+    val canPay = payment.amountValid
+    if (payment.isMandate) {
+        WarningCard("This QR sets up a recurring autopay mandate, not a one-time payment.", prominent = true)
+    }
     DetailCard {
         Field("Pay to", payment.payeeName)
         Field("UPI ID", payment.payeeAddress)
-        payment.amount?.let { Field("Amount", currencySymbol(payment.currency) + it) }
+        if (payment.amountValid) {
+            payment.amount?.let { Field("Amount", currencySymbol(payment.currency) + it) }
+        } else {
+            Column(Modifier.padding(bottom = 6.dp)) {
+                Text("Amount", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
+                SelectionContainer {
+                    Text(
+                        payment.amount?.let { "Invalid amount ($it)" } ?: "Invalid amount",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        }
         Field("Note", payment.note)
+    }
+    if (!payment.amountValid) {
+        WarningCard(
+            "The amount in this QR is not valid, so it can't be paid from here. Ask the payee for a new QR code.",
+            prominent = false,
+        )
     }
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
@@ -275,43 +358,80 @@ private fun PaymentDetails(payment: ScanContent.Payment) {
             )
         }
     }
-    if (apps.isEmpty()) {
-        Text(
-            "No UPI payment apps are installed on this phone.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.error,
-        )
-    } else {
-        Text("Pay with", style = MaterialTheme.typography.titleMedium)
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            apps.forEach { app ->
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier
-                        .width(76.dp)
-                        .clickable { Actions.payWith(context, payment.upiUri, app) }
-                        .padding(4.dp),
-                ) {
-                    Image(app.icon, contentDescription = null, modifier = Modifier.size(48.dp))
-                    Text(
-                        app.label,
-                        style = MaterialTheme.typography.labelSmall,
-                        textAlign = TextAlign.Center,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+    val installed = apps
+    if (canPay) {
+        when {
+            installed == null -> Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    "Finding payment apps…",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            installed.isEmpty() -> Text(
+                "No UPI payment apps are installed on this phone.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.error,
+            )
+            else -> {
+                Text(if (payment.isMandate) "Set up with" else "Pay with", style = MaterialTheme.typography.titleMedium)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    installed.forEach { app ->
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .width(76.dp)
+                                .clickable { Actions.payWith(context, payment.upiUri, app) }
+                                .padding(4.dp),
+                        ) {
+                            Image(app.icon, contentDescription = null, modifier = Modifier.size(48.dp))
+                            Text(
+                                app.label,
+                                style = MaterialTheme.typography.labelSmall,
+                                textAlign = TextAlign.Center,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
                 }
+                Text(
+                    "If your payment app declines, open it and scan the QR from there, or copy the UPI ID.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }
     ActionRow {
-        if (apps.isNotEmpty()) {
-            FilledTonalButton(onClick = { Actions.payWithChooser(context, payment.upiUri) }) {
+        FilledTonalButton(onClick = { Actions.copy(context, "UPI ID", payment.payeeAddress) }) {
+            ButtonContent(Icons.Outlined.ContentCopy, "Copy UPI ID")
+        }
+        if (canPay && !installed.isNullOrEmpty()) {
+            OutlinedButton(onClick = { Actions.payWithChooser(context, payment.upiUri) }) {
                 ButtonContent(Icons.Outlined.Payments, "Choose app")
             }
         }
-        OutlinedButton(onClick = { Actions.copy(context, "UPI ID", payment.payeeAddress) }) {
-            ButtonContent(Icons.Outlined.ContentCopy, "Copy UPI ID")
+    }
+}
+
+@Composable
+private fun WarningCard(message: String, prominent: Boolean) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Outlined.WarningAmber, contentDescription = null, tint = MaterialTheme.colorScheme.onErrorContainer)
+            Spacer(Modifier.width(12.dp))
+            Text(
+                message,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                style = if (prominent) MaterialTheme.typography.titleSmall else MaterialTheme.typography.bodyMedium,
+                fontWeight = if (prominent) FontWeight.Bold else null,
+            )
         }
     }
 }
@@ -327,7 +447,8 @@ private fun WifiDetails(wifi: ScanContent.Wifi) {
             when (wifi.security) {
                 WifiSecurity.OPEN -> "Open (no password)"
                 WifiSecurity.WEP -> "WEP"
-                WifiSecurity.WPA -> "WPA/WPA2/WPA3"
+                WifiSecurity.WPA -> "WPA/WPA2"
+                WifiSecurity.SAE -> "WPA3"
             },
         )
         if (wifi.hidden) Field("Hidden network", "Yes")
@@ -352,7 +473,7 @@ private fun WifiDetails(wifi: ScanContent.Wifi) {
     ActionRow {
         Button(onClick = { Actions.connectWifi(context, wifi) }) { ButtonContent(Icons.Outlined.Wifi, "Connect") }
         if (!wifi.password.isNullOrEmpty()) {
-            OutlinedButton(onClick = { Actions.copy(context, "Wi-Fi password", wifi.password) }) {
+            OutlinedButton(onClick = { Actions.copy(context, "Wi-Fi password", wifi.password, sensitive = true) }) {
                 ButtonContent(Icons.Outlined.ContentCopy, "Copy password")
             }
         }
@@ -435,7 +556,10 @@ private fun GeoDetails(geo: ScanContent.Geo) {
     val context = LocalContext.current
     DetailCard {
         Field("Place", geo.label)
-        Field("Coordinates", "${geo.latitude}, ${geo.longitude}")
+        Field("Address", geo.addressQuery)
+        if (geo.addressQuery == null || geo.latitude != 0.0 || geo.longitude != 0.0) {
+            Field("Coordinates", Actions.plainNumber(geo.latitude) + ", " + Actions.plainNumber(geo.longitude))
+        }
     }
     ActionRow {
         Button(onClick = { Actions.openMap(context, geo) }) { ButtonContent(Icons.Outlined.Map, "Open in maps") }
@@ -448,7 +572,7 @@ private fun EventDetails(event: ScanContent.Event) {
     DetailCard {
         Field("Event", event.summary)
         event.startMillis?.let { Field("Starts", formatEventTime(it, event.allDay)) }
-        event.endMillis?.let { Field("Ends", formatEventTime(it, event.allDay)) }
+        displayedEnd(event)?.let { Field("Ends", formatEventTime(it, event.allDay)) }
         Field("Location", event.location)
         Field("Details", event.description)
     }
@@ -548,10 +672,19 @@ private fun currencySymbol(currency: String?): String = when (currency?.uppercas
     else -> "$currency "
 }
 
-private fun formatTimestamp(millis: Long): String =
-    DateUtils.getRelativeTimeSpanString(millis, System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS).toString()
+private fun displayedEnd(event: ScanContent.Event): Long? {
+    val end = event.endMillis ?: return null
+    if (!event.allDay) return end
+    val lastDay = end - DAY_MILLIS
+    val start = event.startMillis
+    return if (start != null && lastDay <= start) null else lastDay
+}
 
 private fun formatEventTime(millis: Long, allDay: Boolean): String {
-    val format = if (allDay) DateFormat.getDateInstance(DateFormat.MEDIUM) else DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
+    val format = if (allDay) {
+        DateFormat.getDateInstance(DateFormat.MEDIUM).apply { timeZone = TimeZone.getTimeZone("UTC") }
+    } else {
+        DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
+    }
     return format.format(Date(millis))
 }

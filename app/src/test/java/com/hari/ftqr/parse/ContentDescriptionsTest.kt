@@ -15,8 +15,13 @@ class ContentDescriptionsTest {
         phones: List<String> = emptyList(),
     ) = ScanContent.Contact(name, organization, null, phones, emptyList(), null, null, null)
 
-    private fun payment(name: String?, amount: String?, currency: String? = "INR") =
-        ScanContent.Payment("shop@upi", name, amount, currency, null, null, "upi://pay?pa=shop@upi")
+    private fun payment(
+        name: String?,
+        amount: String?,
+        currency: String? = "INR",
+        isMandate: Boolean = false,
+        amountValid: Boolean = true,
+    ) = ScanContent.Payment("shop@upi", name, amount, currency, null, null, "upi://pay?pa=shop@upi", isMandate, amountValid)
 
     @Test
     fun kinds() {
@@ -29,6 +34,9 @@ class ContentDescriptionsTest {
         assertEquals(ContentKind.GEO, ScanContent.Geo(1.0, 2.0, null).kind())
         assertEquals(ContentKind.EVENT, ScanContent.Event(null, null, null, false, null, null).kind())
         assertEquals(ContentKind.PAYMENT, payment(null, null).kind())
+        assertEquals(ContentKind.PAYMENT, payment(null, null, isMandate = true).kind())
+        assertEquals(ContentKind.WIFI, ScanContent.Wifi("n", "p", WifiSecurity.SAE, false).kind())
+        assertEquals(ContentKind.GEO, ScanContent.Geo(0.0, 0.0, "x", "x").kind())
         assertEquals(ContentKind.PRODUCT, ScanContent.Product("123", "EAN-13").kind())
         assertEquals(ContentKind.TEXT, ScanContent.Text("x").kind())
     }
@@ -38,6 +46,17 @@ class ContentDescriptionsTest {
         assertEquals("example.com/a/b", ScanContent.Link("https://www.example.com/a/b/?q=1#top").title())
         assertEquals("example.com", ScanContent.Link("https://example.com/").title())
         assertEquals("details", ScanContent.Link("market://details?id=x").title())
+    }
+
+    @Test
+    fun longLinkTitleKeepsRegistrableEndOfHost() {
+        assertEquals("example.com", ScanContent.Link("https://example.com/" + "p".repeat(100)).title())
+        val host = ("x".repeat(40) + ".").repeat(3) + "paypal.com.evil.io"
+        val title = ScanContent.Link("https://$host/login").title()
+        assertEquals(80, title.length)
+        assertTrue(title, title.startsWith("…"))
+        assertTrue(title, title.endsWith("paypal.com.evil.io"))
+        assertEquals("evil.io/login", ScanContent.Link("https:///evil.io/login").title())
     }
 
     @Test
@@ -52,10 +71,27 @@ class ContentDescriptionsTest {
 
     @Test
     fun paymentTitles() {
-        assertEquals("Hari Stores · ₹150.00", payment("Hari Stores", "150.00").title())
+        assertEquals("Hari Stores (shop@upi) · ₹150.00", payment("Hari Stores", "150.00").title())
         assertEquals("shop@upi", payment(null, null).title())
+        assertEquals("Shop (shop@upi)", payment("Shop", null).title())
         assertEquals("shop@upi · ₹5", payment(null, "5", null).title())
-        assertEquals("Shop · USD 5", payment("Shop", "5", "USD").title())
+        assertEquals("shop@upi · ₹5", payment("shop@upi", "5").title())
+        assertEquals("Shop (shop@upi) · USD 5", payment("Shop", "5", "USD").title())
+    }
+
+    @Test
+    fun mandateAndInvalidAmountTitles() {
+        assertEquals("Autopay: Netflix (shop@upi) · ₹649", payment("Netflix", "649", isMandate = true).title())
+        assertEquals("Autopay: shop@upi", payment(null, null, isMandate = true).title())
+        assertEquals("Shop (shop@upi) · invalid amount", payment("Shop", "-5", amountValid = false).title())
+        assertEquals("shop@upi · invalid amount", payment(null, "abc", amountValid = false).title())
+    }
+
+    @Test
+    fun longPayeeNameIsShortenedButVpaAndAmountKept() {
+        val title = payment("a".repeat(100), "5").title()
+        assertEquals(80, title.length)
+        assertTrue(title, title.endsWith("… (shop@upi) · ₹5"))
     }
 
     @Test

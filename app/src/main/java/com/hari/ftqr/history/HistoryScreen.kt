@@ -1,19 +1,21 @@
 package com.hari.ftqr.history
 
-import android.text.format.DateUtils
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.Close
@@ -38,12 +40,14 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
@@ -57,25 +61,46 @@ import com.hari.ftqr.data.ScanRepository
 import com.hari.ftqr.model.ContentKind
 import com.hari.ftqr.ui.contentKindOf
 import com.hari.ftqr.ui.icon
+import com.hari.ftqr.ui.relativeTime
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalCoroutinesApi::class)
 @Composable
 fun HistoryScreen(repository: ScanRepository, onBack: () -> Unit, onOpen: (Long) -> Unit) {
     var query by rememberSaveable { mutableStateOf("") }
     var kindFilter by rememberSaveable { mutableStateOf("") }
     var confirmClear by remember { mutableStateOf(false) }
-    val scans by remember(query, kindFilter) { repository.observe(query, kindFilter) }
-        .collectAsStateWithLifecycle(initialValue = emptyList())
-    val kinds by remember { repository.observeKinds() }.collectAsStateWithLifecycle(initialValue = emptyList())
+    val scansFlow = remember(repository) {
+        snapshotFlow { query.trim() to kindFilter }
+            .distinctUntilChanged()
+            .flatMapLatest { (q, k) -> repository.observe(q, k) }
+    }
+    val scans by scansFlow.collectAsStateWithLifecycle<List<ScanEntity>?>(initialValue = null)
+    val kinds by remember(repository) { repository.observeKinds() }
+        .collectAsStateWithLifecycle<List<String>?>(initialValue = null)
+    val listState = rememberLazyListState()
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    val deleting = remember { mutableSetOf<Long>() }
+
+    LaunchedEffect(kinds, kindFilter) {
+        val available = kinds ?: return@LaunchedEffect
+        if (kindFilter.isNotEmpty() && kindFilter !in available) kindFilter = ""
+    }
 
     fun deleteWithUndo(scan: ScanEntity) {
+        if (!deleting.add(scan.id)) return
         scope.launch {
-            repository.delete(scan.id)
-            val result = snackbar.showSnackbar("Deleted", actionLabel = "Undo", duration = SnackbarDuration.Short)
-            if (result == SnackbarResult.ActionPerformed) repository.restore(scan)
+            try {
+                repository.delete(scan.id)
+                val result = snackbar.showSnackbar("Deleted", actionLabel = "Undo", duration = SnackbarDuration.Short)
+                if (result == SnackbarResult.ActionPerformed) repository.restore(scan)
+            } finally {
+                deleting.remove(scan.id)
+            }
         }
     }
 
@@ -88,7 +113,7 @@ fun HistoryScreen(repository: ScanRepository, onBack: () -> Unit, onOpen: (Long)
                     IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
                 },
                 actions = {
-                    if (kinds.isNotEmpty()) {
+                    if (!kinds.isNullOrEmpty()) {
                         IconButton(onClick = { confirmClear = true }) {
                             Icon(Icons.Outlined.DeleteSweep, contentDescription = "Clear history")
                         }
@@ -97,7 +122,13 @@ fun HistoryScreen(repository: ScanRepository, onBack: () -> Unit, onOpen: (Long)
             )
         },
     ) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding)) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .consumeWindowInsets(padding)
+                .imePadding()
+        ) {
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },
@@ -111,8 +142,8 @@ fun HistoryScreen(repository: ScanRepository, onBack: () -> Unit, onOpen: (Long)
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
             )
-            val sortedKinds = kinds.map(::contentKindOf).distinct().sortedBy { it.ordinal }
-            if (sortedKinds.size > 1) {
+            val sortedKinds = kinds.orEmpty().map(::contentKindOf).distinct().sortedBy { it.ordinal }
+            if (sortedKinds.size > 1 || kindFilter.isNotEmpty()) {
                 LazyRow(
                     contentPadding = PaddingValues(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -130,11 +161,14 @@ fun HistoryScreen(repository: ScanRepository, onBack: () -> Unit, onOpen: (Long)
                     }
                 }
             }
-            if (scans.isEmpty()) {
+            val current = scans
+            if (current == null) {
+                Box(Modifier.fillMaxSize())
+            } else if (current.isEmpty()) {
                 EmptyHistory(searching = query.isNotBlank() || kindFilter.isNotEmpty())
             } else {
-                LazyColumn(Modifier.fillMaxSize()) {
-                    items(scans, key = { it.id }) { scan ->
+                LazyColumn(Modifier.fillMaxSize(), state = listState) {
+                    items(current, key = { it.id }) { scan ->
                         HistoryRow(scan, onOpen = { onOpen(scan.id) }, onDelete = { deleteWithUndo(scan) })
                         HorizontalDivider()
                     }
@@ -168,11 +202,7 @@ private fun HistoryRow(scan: ScanEntity, onOpen: () -> Unit, onDelete: () -> Uni
         headlineContent = { Text(scan.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
         supportingContent = {
             Text(
-                kind.label + " · " + DateUtils.getRelativeTimeSpanString(
-                    scan.createdAt,
-                    System.currentTimeMillis(),
-                    DateUtils.MINUTE_IN_MILLIS,
-                ),
+                kind.label + " · " + relativeTime(scan.createdAt),
                 maxLines = 1,
             )
         },

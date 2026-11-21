@@ -2,17 +2,20 @@ package com.hari.ftqr.scanner
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.NoPhotography
-import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -30,12 +33,40 @@ import com.hari.ftqr.R
 @Composable
 fun CameraPermissionPanel(
     hasCameraHardware: Boolean,
+    permanentlyDenied: Boolean,
     onGrantPermission: () -> Unit,
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    BoxWithConstraints(modifier = modifier) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .heightIn(min = maxHeight)
+                .padding(horizontal = 24.dp, vertical = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            PanelCard(
+                hasCameraHardware = hasCameraHardware,
+                permanentlyDenied = permanentlyDenied,
+                onGrantPermission = onGrantPermission,
+                onOpenSettings = onOpenSettings,
+            )
+        }
+    }
+}
+
+@Composable
+private fun PanelCard(
+    hasCameraHardware: Boolean,
+    permanentlyDenied: Boolean,
+    onGrantPermission: () -> Unit,
+    onOpenSettings: () -> Unit,
+) {
     Surface(
-        modifier = modifier.widthIn(max = 420.dp),
+        modifier = Modifier.widthIn(max = 420.dp),
         shape = RoundedCornerShape(28.dp),
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
         contentColor = MaterialTheme.colorScheme.onSurface,
@@ -74,13 +105,27 @@ fun CameraPermissionPanel(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
             )
+            if (hasCameraHardware && permanentlyDenied) {
+                Text(
+                    text = "Camera access is turned off. Enable it in Settings.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                    textAlign = TextAlign.Center,
+                )
+            }
             if (hasCameraHardware) {
                 Spacer(modifier = Modifier.height(4.dp))
-                Button(onClick = onGrantPermission, modifier = Modifier.fillMaxWidth()) {
-                    Text("Grant permission")
-                }
-                OutlinedButton(onClick = onOpenSettings, modifier = Modifier.fillMaxWidth()) {
-                    Text("Open settings")
+                if (permanentlyDenied) {
+                    Button(onClick = onOpenSettings, modifier = Modifier.fillMaxWidth()) {
+                        Text("Open settings")
+                    }
+                } else {
+                    Button(onClick = onGrantPermission, modifier = Modifier.fillMaxWidth()) {
+                        Text("Grant permission")
+                    }
+                    OutlinedButton(onClick = onOpenSettings, modifier = Modifier.fillMaxWidth()) {
+                        Text("Open settings")
+                    }
                 }
             }
         }

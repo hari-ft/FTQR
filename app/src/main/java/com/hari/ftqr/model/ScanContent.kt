@@ -16,7 +16,7 @@ sealed interface ScanContent {
     data class Phone(val number: String) : ScanContent
     data class Email(val address: String, val subject: String?, val body: String?) : ScanContent
     data class Sms(val number: String, val message: String?) : ScanContent
-    data class Geo(val latitude: Double, val longitude: Double, val label: String?) : ScanContent
+    data class Geo(val latitude: Double, val longitude: Double, val label: String?, val addressQuery: String? = null) : ScanContent
     data class Event(
         val summary: String?,
         val startMillis: Long?,
@@ -33,12 +33,14 @@ sealed interface ScanContent {
         val note: String?,
         val merchantCode: String?,
         val upiUri: String,
+        val isMandate: Boolean = false,
+        val amountValid: Boolean = true,
     ) : ScanContent
     data class Product(val code: String, val formatName: String) : ScanContent
     data class Text(val text: String) : ScanContent
 }
 
-enum class WifiSecurity { OPEN, WEP, WPA }
+enum class WifiSecurity { OPEN, WEP, WPA, SAE }
 
 enum class ContentKind(val label: String) {
     LINK("Link"),
@@ -62,6 +64,7 @@ enum class LinkWarning(val message: String) {
     CREDENTIALS_IN_URL("Contains text before '@' that can disguise the real domain."),
     NON_STANDARD_PORT("Uses an unusual port number."),
     UNUSUAL_SCHEME("Not a web link. It may open another app."),
+    MISSING_HOST("The website address is missing or malformed."),
 }
 
 data class LinkAssessment(val url: String, val scheme: String, val host: String, val warnings: List<LinkWarning>)

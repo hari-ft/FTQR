@@ -36,6 +36,8 @@ object ContentParser {
     private val webLinkPattern = Regex("^https?://\\S+$", RegexOption.IGNORE_CASE)
     private val bareWwwPattern = Regex("^www\\.[^\\s.]+(\\.[^\\s.]+)+\\S*$", RegexOption.IGNORE_CASE)
     private val genericSchemeLinkPattern = Regex("^[a-z][a-z0-9+.\\-]*://\\S+$", RegexOption.IGNORE_CASE)
+    private val schemePrefixPattern = Regex("^[a-z][a-z0-9+.\\-]*:", RegexOption.IGNORE_CASE)
+    private val authorityTerminators = charArrayOf('/', '?', '#', '\\')
     private val coordinateQueryPattern = Regex("^\\s*(-?\\d+(?:\\.\\d+)?)\\s*,\\s*(-?\\d+(?:\\.\\d+)?)\\s*(?:\\((.*)\\))?\\s*$")
 
     fun parse(raw: String, format: Int): ScanContent = try {
@@ -62,9 +64,11 @@ object ContentParser {
             lower.startsWith("smsto:") -> parseSms(text.substring(6))
             lower.startsWith("sms:") -> parseSms(text.substring(4))
             lower.startsWith("geo:") -> parseGeo(text.substring(4))
-            webLinkPattern.matches(text) -> ScanContent.Link(text)
-            bareWwwPattern.matches(text) -> ScanContent.Link("https://$text")
-            genericSchemeLinkPattern.matches(text) -> ScanContent.Link(text)
+            lower.startsWith("mebkm:") -> parseMeBookmark(text.substring(6))
+            lower.startsWith("urlto:") -> parseUrlTo(text.substring(6))
+            webLinkPattern.matches(text) -> ScanContent.Link(normalizeLink(text))
+            bareWwwPattern.matches(text) -> ScanContent.Link(normalizeLink("https://$text"))
+            genericSchemeLinkPattern.matches(text) -> ScanContent.Link(normalizeLink(text))
             else -> null
         }
         return parsed ?: ScanContent.Text(raw)
@@ -85,6 +89,7 @@ object ContentParser {
         val type = fields.first("T")?.let(::decodeWifiValue)?.trim()?.uppercase().orEmpty()
         val security = when (type) {
             "WEP" -> WifiSecurity.WEP
+            "SAE", "WPA3" -> WifiSecurity.SAE
             "NOPASS", "NONE", "OPEN" -> WifiSecurity.OPEN
             "" -> if (password == null) WifiSecurity.OPEN else WifiSecurity.WPA
             else -> WifiSecurity.WPA
@@ -142,7 +147,7 @@ object ContentParser {
     }
 
     private fun parseMailto(rest: String): ScanContent.Email? {
-        val params = TextCodec.parseQuery(rest.substringAfter('?', ""), plusAsSpace = true)
+        val params = TextCodec.parseQuery(rest.substringAfter('?', ""), plusAsSpace = false)
         val address = TextCodec.percentDecode(rest.substringBefore('?'), plusAsSpace = false).trim()
             .ifEmpty { params["to"]?.trim().orEmpty() }
         if (address.isEmpty()) return null
@@ -186,12 +191,47 @@ object ContentParser {
             return geoOrNull(queryMatch.groupValues[1].toDouble(), queryMatch.groupValues[2].toDouble(), label)
         }
         if (latitude == null || longitude == null) return null
-        return geoOrNull(latitude, longitude, query?.ifEmpty { null })
+        val addressQuery = query?.ifEmpty { null }
+        if (latitude == 0.0 && longitude == 0.0 && addressQuery != null) {
+            return ScanContent.Geo(0.0, 0.0, addressQuery, addressQuery)
+        }
+        return geoOrNull(latitude, longitude, addressQuery)
     }
 
     private fun geoOrNull(latitude: Double, longitude: Double, label: String?): ScanContent.Geo? {
         if (latitude !in -90.0..90.0 || longitude !in -180.0..180.0) return null
         return ScanContent.Geo(latitude, longitude, label)
+    }
+
+    private fun parseMeBookmark(body: String): ScanContent.Link? =
+        FieldList.parse(body).first("URL")?.let(::cleanField)?.let(::bookmarkLink)
+
+    private fun parseUrlTo(body: String): ScanContent.Link? {
+        val separator = body.indexOf(':')
+        if (separator < 0) return null
+        return bookmarkLink(body.substring(separator + 1).trim())
+    }
+
+    private fun bookmarkLink(url: String): ScanContent.Link? = when {
+        url.isEmpty() || url.any { it.isWhitespace() } -> null
+        schemePrefixPattern.containsMatchIn(url) -> ScanContent.Link(normalizeLink(url))
+        url.contains('.') -> ScanContent.Link(normalizeLink("https://$url"))
+        else -> null
+    }
+
+    internal fun normalizeLink(url: String): String {
+        val colon = url.indexOf(':')
+        if (colon <= 0) return url
+        val scheme = url.substring(0, colon).lowercase()
+        val rest = url.substring(colon + 1)
+        if (scheme != "http" && scheme != "https") return "$scheme:$rest"
+        val slashes = rest.takeWhile { it == '/' || it == '\\' }
+        val hierarchical = rest.substring(slashes.length)
+        val authorityEnd = hierarchical.indexOfAny(authorityTerminators).let { if (it < 0) hierarchical.length else it }
+        val authority = hierarchical.substring(0, authorityEnd)
+        val hostStart = authority.lastIndexOf('@') + 1
+        val normalizedAuthority = authority.substring(0, hostStart) + authority.substring(hostStart).lowercase()
+        return "$scheme:$slashes$normalizedAuthority${hierarchical.substring(authorityEnd)}"
     }
 }
 

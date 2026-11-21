@@ -8,6 +8,9 @@ private const val MAX_TITLE_LENGTH = 80
 private const val ELLIPSIS = "…"
 private const val RUPEE_SIGN = "₹"
 private const val TITLE_SEPARATOR = " · "
+private const val AUTOPAY_PREFIX = "Autopay: "
+private const val INVALID_AMOUNT = "invalid amount"
+private const val MIN_NAME_LENGTH = 4
 
 fun ScanContent.kind(): ContentKind = when (this) {
     is ScanContent.Link -> ContentKind.LINK
@@ -46,26 +49,39 @@ fun ScanContent.title(): String {
 private fun linkTitle(url: String): String {
     val host = LinkSafety.assess(url).host.removePrefix("www.")
     val afterScheme = if (url.contains("://")) url.substringAfter("://") else url.substringAfter(':')
-    val withoutQuery = afterScheme.substringBefore('?').substringBefore('#')
-    val path = withoutQuery.substringAfter('/', "").trimEnd('/')
+    val withoutQuery = afterScheme.trimStart('/', '\\').substringBefore('?').substringBefore('#')
+    val pathStart = withoutQuery.indexOfAny(charArrayOf('/', '\\'))
+    val path = if (pathStart < 0) "" else withoutQuery.substring(pathStart + 1).trimEnd('/')
     val combined = when {
         host.isEmpty() -> withoutQuery.trimEnd('/')
+        host.length > MAX_TITLE_LENGTH -> ELLIPSIS + host.takeLast(MAX_TITLE_LENGTH - ELLIPSIS.length)
         path.isEmpty() -> host
+        host.length + 1 + path.length > MAX_TITLE_LENGTH -> host
         else -> "$host/$path"
     }
     return combined.ifBlank { url }
 }
 
 private fun paymentTitle(payment: ScanContent.Payment): String {
-    val payee = payment.payeeName?.takeIf { it.isNotBlank() } ?: payment.payeeAddress
-    val amount = payment.amount?.takeIf { it.isNotBlank() } ?: return payee
-    val currency = payment.currency
-    val amountText = if (currency == null || currency.equals("INR", ignoreCase = true)) {
-        "$RUPEE_SIGN$amount"
-    } else {
-        "$currency $amount"
+    val prefix = if (payment.isMandate) AUTOPAY_PREFIX else ""
+    val address = payment.payeeAddress
+    val amount = payment.amount?.takeIf { it.isNotBlank() }
+    val amountText = when {
+        amount == null -> ""
+        !payment.amountValid -> "$TITLE_SEPARATOR$INVALID_AMOUNT"
+        payment.currency == null || payment.currency.equals("INR", ignoreCase = true) -> "$TITLE_SEPARATOR$RUPEE_SIGN$amount"
+        else -> "$TITLE_SEPARATOR${payment.currency} $amount"
     }
-    return "$payee$TITLE_SEPARATOR$amountText"
+    val name = payment.payeeName?.let(::firstLine)?.takeIf { it.isNotEmpty() && it != address }
+        ?: return "$prefix$address$amountText"
+    val suffix = " ($address)$amountText"
+    val room = MAX_TITLE_LENGTH - prefix.length - suffix.length
+    val fittedName = when {
+        name.length <= room -> name
+        room >= MIN_NAME_LENGTH -> name.take(room - ELLIPSIS.length).trimEnd() + ELLIPSIS
+        else -> return "$prefix$address$amountText"
+    }
+    return "$prefix$fittedName$suffix"
 }
 
 private fun formatCoordinate(value: Double): String =

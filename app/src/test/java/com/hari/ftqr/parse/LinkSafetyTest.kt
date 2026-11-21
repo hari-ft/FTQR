@@ -106,4 +106,53 @@ class LinkSafetyTest {
         LinkSafety.assess("https://")
         LinkSafety.assess("https://[::1")
     }
+
+    @Test
+    fun leadingSlashesAndBackslashesAreSkippedForWebSchemes() {
+        val tripleSlash = LinkSafety.assess("https:///xn--pypal-4ve.com/login")
+        assertEquals("xn--pypal-4ve.com", tripleSlash.host)
+        assertEquals(listOf(LinkWarning.LOOKALIKE_DOMAIN), tripleSlash.warnings)
+
+        val backslash = LinkSafety.assess("https://\\1.2.3.4/")
+        assertEquals("1.2.3.4", backslash.host)
+        assertEquals(listOf(LinkWarning.IP_ADDRESS), backslash.warnings)
+
+        assertEquals("example.com", LinkSafety.assess("https:example.com/x").host)
+    }
+
+    @Test
+    fun missingHost() {
+        assertEquals(listOf(LinkWarning.MISSING_HOST), LinkSafety.assess("https://").warnings)
+        assertEquals(listOf(LinkWarning.MISSING_HOST), LinkSafety.assess("https:///?q=1").warnings)
+        assertEquals(
+            listOf(LinkWarning.INSECURE_HTTP, LinkWarning.MISSING_HOST, LinkWarning.CREDENTIALS_IN_URL),
+            LinkSafety.assess("http://user@/").warnings,
+        )
+    }
+
+    @Test
+    fun percentEncodedHostIsDecodedBeforeChecks() {
+        val assessment = LinkSafety.assess("https://p%D0%B0ypal.com/")
+        assertTrue(assessment.host.startsWith("xn--"))
+        assertEquals(listOf(LinkWarning.LOOKALIKE_DOMAIN), assessment.warnings)
+        assertEquals("example.com", LinkSafety.assess("https://ex%61mple.com/").host)
+        assertEquals(listOf(LinkWarning.SHORTENER), LinkSafety.assess("https://bit%2Ely/x").warnings)
+    }
+
+    @Test
+    fun whatwgStyleIpv4Hosts() {
+        for (url in listOf(
+            "https://127.1/",
+            "https://192.168.1/",
+            "https://0300.0250.0.1/",
+            "https://0xC0.0xA8.0.1/",
+            "https://3232235777/",
+            "https://0x7f000001/",
+            "https://example.com.127/",
+        )) {
+            assertEquals(url, listOf(LinkWarning.IP_ADDRESS), LinkSafety.assess(url).warnings)
+        }
+        assertEquals(emptyList<LinkWarning>(), LinkSafety.assess("https://1.example.com/").warnings)
+        assertEquals(emptyList<LinkWarning>(), LinkSafety.assess("https://0xcafe.com/").warnings)
+    }
 }

@@ -46,13 +46,32 @@ class ContentParserTest {
     @Test
     fun webLinks() {
         assertEquals(ScanContent.Link("https://example.com/a?b=c"), ContentParser.parse("https://example.com/a?b=c", qr))
-        assertEquals(ScanContent.Link("HTTP://EXAMPLE.COM"), ContentParser.parse("  HTTP://EXAMPLE.COM \n", qr))
+        assertEquals(ScanContent.Link("http://example.com"), ContentParser.parse("  HTTP://EXAMPLE.COM \n", qr))
         assertEquals(ScanContent.Link("https://www.example.com/path"), ContentParser.parse("www.example.com/path", qr))
         assertEquals(ScanContent.Link("market://details?id=com.example"), ContentParser.parse("market://details?id=com.example", qr))
         assertEquals(
             ScanContent.Link("intent://scan/#Intent;scheme=zxing;end"),
             ContentParser.parse("intent://scan/#Intent;scheme=zxing;end", qr),
         )
+    }
+
+    @Test
+    fun uppercaseSchemesAreLowercased() {
+        assertEquals(ScanContent.Link("https://example.com/A1"), ContentParser.parse("HTTPS://EXAMPLE.COM/A1", qr))
+        assertEquals(ScanContent.Link("https://User@example.com:8080/P?Q=R"), ContentParser.parse("Https://User@Example.COM:8080/P?Q=R", qr))
+        assertEquals(ScanContent.Link("market://details?id=Com.X"), ContentParser.parse("MARKET://details?id=Com.X", qr))
+        assertEquals(ScanContent.Link("https://www.example.com/Path"), ContentParser.parse("WWW.Example.com/Path", qr))
+    }
+
+    @Test
+    fun bookmarks() {
+        assertEquals(ScanContent.Link("http://example.com"), ContentParser.parse("MEBKM:TITLE:Site;URL:http\\://example.com;;", qr))
+        assertEquals(ScanContent.Link("https://example.com/a"), ContentParser.parse("mebkm:URL:HTTPS\\://Example.com/a;TITLE:x;;", qr))
+        assertEquals(ScanContent.Link("https://example.org"), ContentParser.parse("MEBKM:TITLE:x;URL:example.org;;", qr))
+        assertEquals(ScanContent.Link("https://example.com/x"), ContentParser.parse("URLTO:My Site:https://example.com/x", qr))
+        assertEquals(ScanContent.Link("http://a.b"), ContentParser.parse("urlto::http://a.b", qr))
+        assertEquals(ScanContent.Text("MEBKM:TITLE:x;;"), ContentParser.parse("MEBKM:TITLE:x;;", qr))
+        assertEquals(ScanContent.Text("URLTO:title"), ContentParser.parse("URLTO:title", qr))
     }
 
     @Test
@@ -84,8 +103,9 @@ class ContentParserTest {
 
     @Test
     fun wifiSecurityVariants() {
-        assertEquals(WifiSecurity.WPA, parseAs<ScanContent.Wifi>("WIFI:T:WPA3;S:a;P:b;;").security)
-        assertEquals(WifiSecurity.WPA, parseAs<ScanContent.Wifi>("WIFI:T:SAE;S:a;P:b;;").security)
+        assertEquals(WifiSecurity.SAE, parseAs<ScanContent.Wifi>("WIFI:T:WPA3;S:a;P:b;;").security)
+        assertEquals(WifiSecurity.SAE, parseAs<ScanContent.Wifi>("WIFI:T:sae;S:a;P:b;;").security)
+        assertEquals(WifiSecurity.WPA, parseAs<ScanContent.Wifi>("WIFI:T:WPA2;S:a;P:b;;").security)
         assertEquals(WifiSecurity.WPA, parseAs<ScanContent.Wifi>("WIFI:S:a;P:b;;").security)
         val open = parseAs<ScanContent.Wifi>("WIFI:T:nopass;S:Cafe;P:;;")
         assertEquals(WifiSecurity.OPEN, open.security)
@@ -93,6 +113,13 @@ class ContentParserTest {
         assertFalse(open.hidden)
         val missingType = parseAs<ScanContent.Wifi>("WIFI:S:Lobby;;")
         assertEquals(WifiSecurity.OPEN, missingType.security)
+    }
+
+    @Test
+    fun wifiSecuredWithoutPasswordKeepsType() {
+        assertEquals(ScanContent.Wifi("a", null, WifiSecurity.WPA, false), ContentParser.parse("WIFI:T:WPA;S:a;;", qr))
+        assertEquals(ScanContent.Wifi("a", null, WifiSecurity.WPA, false), ContentParser.parse("WIFI:T:WPA2;S:a;P:;;", qr))
+        assertEquals(ScanContent.Wifi("a", null, WifiSecurity.SAE, false), ContentParser.parse("WIFI:T:SAE;S:a;;", qr))
     }
 
     @Test
@@ -186,7 +213,8 @@ class ContentParserTest {
     @Test
     fun mailto() {
         val email = parseAs<ScanContent.Email>("mailto:someone@example.com?subject=Hello%20there&body=Line+one%0ALine%20two")
-        assertEquals(ScanContent.Email("someone@example.com", "Hello there", "Line one\nLine two"), email)
+        assertEquals(ScanContent.Email("someone@example.com", "Hello there", "Line+one\nLine two"), email)
+        assertEquals("1+1", parseAs<ScanContent.Email>("mailto:a@b.com?subject=1+1").subject)
         assertEquals(ScanContent.Email("a+tag@b.com", null, null), ContentParser.parse("MAILTO:a+tag@b.com", qr))
     }
 
@@ -211,6 +239,16 @@ class ContentParserTest {
         assertEquals(ScanContent.Geo(-33.8, 151.2, null), ContentParser.parse("GEO:-33.8,151.2,10;u=35", qr))
         assertEquals(ScanContent.Text("geo:abc"), ContentParser.parse("geo:abc", qr))
         assertEquals(ScanContent.Text("geo:95,10"), ContentParser.parse("geo:95,10", qr))
+    }
+
+    @Test
+    fun geoAddressQuery() {
+        assertEquals(
+            ScanContent.Geo(0.0, 0.0, "1600 Amphitheatre Pkwy", "1600 Amphitheatre Pkwy"),
+            ContentParser.parse("geo:0,0?q=1600+Amphitheatre+Pkwy", qr),
+        )
+        assertEquals(ScanContent.Geo(0.0, 0.0, null), ContentParser.parse("geo:0,0", qr))
+        assertEquals(ScanContent.Geo(0.0, 0.0, null), ContentParser.parse("geo:0,0?q=", qr))
     }
 
     @Test
@@ -262,6 +300,22 @@ class ContentParserTest {
     }
 
     @Test
+    fun eventTimeZonePrefixesAndWindowsNames() {
+        val kolkata = LocalDateTime.of(2025, 6, 1, 14, 0).atZone(ZoneId.of("Asia/Kolkata")).toInstant().toEpochMilli()
+        val prefixed = parseAs<ScanContent.Event>("BEGIN:VEVENT\nDTSTART;TZID=/mozilla.org/20050126_1/Asia/Kolkata:20250601T140000\nEND:VEVENT")
+        assertEquals(kolkata, prefixed.startMillis)
+        val windows = parseAs<ScanContent.Event>("BEGIN:VEVENT\nDTSTART;TZID=\"India Standard Time\":20250601T140000\nEND:VEVENT")
+        assertEquals(kolkata, windows.startMillis)
+        val pacific = LocalDateTime.of(2025, 6, 1, 14, 0).atZone(ZoneId.of("America/Los_Angeles")).toInstant().toEpochMilli()
+        assertEquals(pacific, parseAs<ScanContent.Event>("BEGIN:VEVENT\nDTSTART;TZID=Pacific Standard Time:20250601T140000\nEND:VEVENT").startMillis)
+        assertEquals(ZoneId.of("America/Argentina/Buenos_Aires"), EventParser.zoneFor("/tzurl.org/x/America/Argentina/Buenos_Aires"))
+        assertEquals(ZoneId.of("UTC"), EventParser.zoneFor("Coordinated Universal Time"))
+        assertEquals(ZoneId.of("Europe/London"), EventParser.zoneFor("gmt standard time"))
+        assertEquals(ZoneId.systemDefault(), EventParser.zoneFor("Nowhere/Land"))
+        assertEquals(ZoneId.systemDefault(), EventParser.zoneFor(null))
+    }
+
+    @Test
     fun eventWithBadDateKeepsOtherFields() {
         val event = parseAs<ScanContent.Event>("BEGIN:VEVENT\nSUMMARY:Party\nDTSTART:20251399T250000\nEND:VEVENT")
         assertEquals("Party", event.summary)
@@ -275,7 +329,7 @@ class ContentParserTest {
         assertEquals("merchant@okaxis", payment.payeeAddress)
         assertEquals("Hari Stores", payment.payeeName)
         assertEquals("Order 42", payment.note)
-        assertEquals(raw, payment.upiUri)
+        assertEquals("upi://pay?pa=merchant@okaxis&pn=Hari%20Stores&am=150.00&cu=INR&tn=Order%2042&mc=5411", payment.upiUri)
     }
 
     @Test

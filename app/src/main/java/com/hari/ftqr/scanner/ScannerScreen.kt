@@ -1,8 +1,10 @@
 package com.hari.ftqr.scanner
 
 import android.Manifest
+import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -19,13 +21,18 @@ import androidx.camera.view.CameraController
 import androidx.camera.view.LifecycleCameraController
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.indication
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.absolutePadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -33,6 +40,7 @@ import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
@@ -54,8 +62,8 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -69,12 +77,27 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.boundsInParent
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -86,6 +109,8 @@ import com.google.mlkit.vision.barcode.common.Barcode
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
 
+private const val READING_IMAGE = "Reading image"
+
 @Composable
 fun ScannerScreen(
     onScanned: (rawValue: String, format: Int) -> Unit,
@@ -94,6 +119,8 @@ fun ScannerScreen(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val density = LocalDensity.current
+    val layoutDirection = LocalLayoutDirection.current
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     val haptics = rememberScanHaptics()
@@ -104,14 +131,21 @@ fun ScannerScreen(
     }
     var hasCameraPermission by remember { mutableStateOf(context.isCameraPermissionGranted()) }
     var permissionRequested by rememberSaveable { mutableStateOf(false) }
+    var permanentlyDenied by rememberSaveable { mutableStateOf(false) }
     val cameraActive = hasCameraHardware && hasCameraPermission
 
+    val screenDisposed = remember { AtomicBoolean(false) }
     val scanHandled = remember { AtomicBoolean(false) }
+    val torchSynced = remember { AtomicBoolean(false) }
     val deliverScan: (String, Int) -> Unit = remember(haptics) {
         { rawValue: String, format: Int ->
             haptics.perform()
             currentOnScanned(rawValue, format)
         }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { screenDisposed.set(true) }
     }
 
     val scanner = remember {
@@ -133,35 +167,59 @@ fun ScannerScreen(
         }
     }
 
+    var desiredTorchOn by rememberSaveable { mutableStateOf(false) }
     var torchOn by remember { mutableStateOf(false) }
     var hasFlashUnit by remember { mutableStateOf(false) }
     var linearZoom by remember { mutableFloatStateOf(0f) }
     var isDecodingImage by remember { mutableStateOf(false) }
     var showNoCodeFound by remember { mutableStateOf(false) }
 
+    var containerSize by remember { mutableStateOf(IntSize.Zero) }
+    var topBarBottom by remember { mutableFloatStateOf(0f) }
+    var controlsBounds by remember { mutableStateOf(Rect.Zero) }
+
+    val safeLeft = WindowInsets.safeDrawing.getLeft(density, layoutDirection).toFloat()
+    val safeRight = WindowInsets.safeDrawing.getRight(density, layoutDirection).toFloat()
+    val safeBottom = WindowInsets.safeDrawing.getBottom(density).toFloat()
+
+    val freeArea = remember(containerSize, topBarBottom, controlsBounds, safeLeft, safeRight, safeBottom) {
+        computeFreeArea(containerSize, topBarBottom, controlsBounds, safeLeft, safeRight, safeBottom)
+    }
+    val viewfinderLayout = remember(freeArea, density) {
+        freeArea?.let { with(density) { computeViewfinderLayout(it) } }
+    }
+    val latestViewfinderLayout by rememberUpdatedState(viewfinderLayout)
+
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
         permissionRequested = true
         hasCameraPermission = granted
+        val activity = context.findActivity()
+        permanentlyDenied = !granted && activity != null &&
+            !ActivityCompat.shouldShowRequestPermissionRationale(activity, Manifest.permission.CAMERA)
     }
 
     val galleryLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia(),
     ) { uri ->
-        if (uri != null) {
+        if (uri != null && !screenDisposed.get()) {
             isDecodingImage = true
             scope.launch {
-                val result = decodeBarcodeFromImage(context, uri, scanner)
-                isDecodingImage = false
+                val result = try {
+                    decodeBarcodeFromImage(context, uri, scanner)
+                } finally {
+                    isDecodingImage = false
+                }
+                if (screenDisposed.get()) return@launch
                 when (result) {
                     is GalleryScanResult.Found -> {
-                        scanHandled.set(true)
-                        deliverScan(result.rawValue, result.format)
+                        if (scanHandled.compareAndSet(false, true)) {
+                            deliverScan(result.rawValue, result.format)
+                        }
                     }
                     GalleryScanResult.NotFound -> showNoCodeFound = true
-                    is GalleryScanResult.Failed ->
-                        snackbarHostState.showSnackbar("Couldn't read that image")
+                    is GalleryScanResult.Failed -> snackbarHostState.showSnackbar(result.message)
                 }
             }
         }
@@ -176,9 +234,14 @@ fun ScannerScreen(
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                hasCameraPermission = context.isCameraPermissionGranted()
-                scanHandled.set(false)
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> {
+                    val granted = context.isCameraPermissionGranted()
+                    hasCameraPermission = granted
+                    if (granted) permanentlyDenied = false
+                }
+                Lifecycle.Event.ON_STOP -> torchSynced.set(false)
+                else -> Unit
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -203,35 +266,49 @@ fun ScannerScreen(
     }
 
     DisposableEffect(cameraController, lifecycleOwner, cameraActive, scanner) {
+        val analyzerActive = AtomicBoolean(cameraActive)
         if (cameraActive) {
+            torchSynced.set(false)
             val mainExecutor = ContextCompat.getMainExecutor(context)
+            fun onAnalyzerResult(result: MlKitAnalyzer.Result) {
+                if (!analyzerActive.get() || screenDisposed.get()) return
+                if (torchSynced.compareAndSet(false, true)) {
+                    val flash = cameraController.cameraInfo?.hasFlashUnit() == true
+                    hasFlashUnit = flash
+                    if (flash && desiredTorchOn) cameraController.enableTorch(true)
+                }
+                val cutout = latestViewfinderLayout?.cutout ?: return
+                val barcode = pickBarcodeInCutout(result.getValue(scanner).orEmpty(), cutout) ?: return
+                val rawValue = barcode.rawValue ?: return
+                if (scanHandled.compareAndSet(false, true)) {
+                    deliverScan(rawValue, barcode.format)
+                }
+            }
             cameraController.setImageAnalysisAnalyzer(
                 mainExecutor,
                 MlKitAnalyzer(
                     listOf(scanner),
                     ImageAnalysis.COORDINATE_SYSTEM_VIEW_REFERENCED,
                     mainExecutor,
-                ) { result ->
-                    val barcode = result.getValue(scanner)?.firstOrNull { !it.rawValue.isNullOrEmpty() }
-                    val rawValue = barcode?.rawValue
-                    if (barcode != null && rawValue != null && scanHandled.compareAndSet(false, true)) {
-                        deliverScan(rawValue, barcode.format)
-                    }
-                },
+                ) { result -> onAnalyzerResult(result) },
             )
             cameraController.bindToLifecycle(lifecycleOwner)
         }
         onDispose {
+            analyzerActive.set(false)
             cameraController.clearImageAnalysisAnalyzer()
             cameraController.unbind()
         }
     }
 
-    Box(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Black),
+            .background(Color.Black)
+            .onSizeChanged { containerSize = it },
     ) {
+        val landscape = maxWidth > maxHeight && maxWidth >= 560.dp
+
         if (cameraActive) {
             AndroidView(
                 factory = { viewContext ->
@@ -248,27 +325,46 @@ fun ScannerScreen(
                 onRelease = { previewView -> previewView.controller = null },
                 modifier = Modifier.fillMaxSize(),
             )
-            ViewfinderOverlay(modifier = Modifier.fillMaxSize())
+            ViewfinderOverlay(layout = viewfinderLayout, modifier = Modifier.fillMaxSize())
         } else {
+            val panelArea = freeArea
+            val panelModifier = if (panelArea != null && containerSize != IntSize.Zero) {
+                with(density) {
+                    Modifier.absolutePadding(
+                        left = panelArea.left.toDp(),
+                        top = panelArea.top.toDp(),
+                        right = (containerSize.width - panelArea.right).coerceAtLeast(0f).toDp(),
+                        bottom = (containerSize.height - panelArea.bottom).coerceAtLeast(0f).toDp(),
+                    )
+                }
+            } else {
+                Modifier.windowInsetsPadding(WindowInsets.safeDrawing)
+            }
             CameraPermissionPanel(
                 hasCameraHardware = hasCameraHardware,
+                permanentlyDenied = permanentlyDenied,
                 onGrantPermission = {
                     permissionRequested = true
                     permissionLauncher.launch(Manifest.permission.CAMERA)
                 },
                 onOpenSettings = { context.openAppSettings() },
                 modifier = Modifier
-                    .align(Alignment.Center)
-                    .windowInsetsPadding(WindowInsets.safeDrawing)
-                    .padding(24.dp),
+                    .fillMaxSize()
+                    .then(panelModifier),
             )
         }
 
         ScannerTopBar(
             showTorch = cameraActive && hasFlashUnit,
             torchOn = torchOn,
-            onToggleTorch = { cameraController.enableTorch(!torchOn) },
+            onToggleTorch = {
+                desiredTorchOn = !torchOn
+                cameraController.enableTorch(desiredTorchOn)
+            },
             modifier = Modifier
+                .onGloballyPositioned { coordinates ->
+                    topBarBottom = coordinates.boundsInParent().bottom
+                }
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
                 .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
@@ -277,23 +373,16 @@ fun ScannerScreen(
 
         Column(
             modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
+                .onGloballyPositioned { coordinates ->
+                    controlsBounds = coordinates.boundsInParent()
+                }
+                .align(if (landscape) Alignment.BottomEnd else Alignment.BottomCenter)
                 .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
-                .padding(horizontal = 16.dp, vertical = 16.dp),
+                .then(if (landscape) Modifier.width(320.dp) else Modifier.fillMaxWidth())
+                .padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            SnackbarHost(hostState = snackbarHostState)
-            if (showNoCodeFound) {
-                NoCodeFoundDialog(
-                    onTryAnother = {
-                        showNoCodeFound = false
-                        galleryLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                    },
-                    onDismiss = { showNoCodeFound = false },
-                )
-            }
             if (cameraActive) {
                 ZoomControl(
                     value = linearZoom,
@@ -332,7 +421,70 @@ fun ScannerScreen(
                 )
             }
         }
+
+        val snackbarBottom = with(density) {
+            if (containerSize != IntSize.Zero && controlsBounds != Rect.Zero) {
+                (containerSize.height - controlsBounds.top).coerceAtLeast(0f).toDp()
+            } else {
+                0.dp
+            }
+        }
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = snackbarBottom)
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal)),
+        )
+
+        if (showNoCodeFound) {
+            NoCodeFoundDialog(
+                onTryAnother = {
+                    showNoCodeFound = false
+                    galleryLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                },
+                onDismiss = { showNoCodeFound = false },
+            )
+        }
     }
+}
+
+private fun computeFreeArea(
+    containerSize: IntSize,
+    topBarBottom: Float,
+    controlsBounds: Rect,
+    safeLeft: Float,
+    safeRight: Float,
+    safeBottom: Float,
+): Rect? {
+    if (containerSize == IntSize.Zero || controlsBounds == Rect.Zero) return null
+    val width = containerSize.width.toFloat()
+    val height = containerSize.height.toFloat()
+    val controlsSpanWidth = controlsBounds.width >= width * 0.9f
+    val area = when {
+        controlsSpanWidth -> Rect(safeLeft, topBarBottom, width - safeRight, controlsBounds.top)
+        controlsBounds.center.x >= width / 2f -> Rect(safeLeft, topBarBottom, controlsBounds.left, height - safeBottom)
+        else -> Rect(controlsBounds.right, topBarBottom, width - safeRight, height - safeBottom)
+    }
+    return area.takeIf { it.width > 0f && it.height > 0f }
+}
+
+private fun pickBarcodeInCutout(barcodes: List<Barcode>, cutout: Rect): Barcode? {
+    val cutoutCenter = cutout.center
+    var best: Barcode? = null
+    var bestDistance = Float.MAX_VALUE
+    for (barcode in barcodes) {
+        if (barcode.rawValue.isNullOrEmpty()) continue
+        val box = barcode.boundingBox ?: continue
+        val center = Offset(box.exactCenterX(), box.exactCenterY())
+        if (!cutout.contains(center)) continue
+        val distance = (center - cutoutCenter).getDistanceSquared()
+        if (distance < bestDistance) {
+            bestDistance = distance
+            best = barcode
+        }
+    }
+    return best
 }
 
 @Composable
@@ -405,7 +557,8 @@ private fun ZoomControl(
             ),
             modifier = Modifier
                 .weight(1f)
-                .padding(horizontal = 8.dp),
+                .padding(horizontal = 8.dp)
+                .semantics { contentDescription = "Zoom" },
         )
         Icon(
             imageVector = Icons.Outlined.ZoomIn,
@@ -424,28 +577,35 @@ private fun ScannerControlButton(
     modifier: Modifier = Modifier,
     busy: Boolean = false,
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
     Column(
-        modifier = modifier,
+        modifier = modifier.clickable(
+            interactionSource = interactionSource,
+            indication = null,
+            enabled = !busy,
+            role = Role.Button,
+            onClick = onClick,
+        ),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Surface(
-            onClick = onClick,
-            enabled = !busy,
-            shape = CircleShape,
-            color = Color.Black.copy(alpha = 0.5f),
-            contentColor = Color.White,
-            modifier = Modifier.size(56.dp),
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .size(56.dp)
+                .clip(CircleShape)
+                .background(Color.Black.copy(alpha = 0.5f))
+                .indication(interactionSource, ripple(color = Color.White)),
         ) {
-            Box(contentAlignment = Alignment.Center) {
-                if (busy) {
-                    CircularProgressIndicator(
-                        color = Color.White,
-                        strokeWidth = 2.dp,
-                        modifier = Modifier.size(24.dp),
-                    )
-                } else {
-                    Icon(imageVector = icon, contentDescription = label)
-                }
+            if (busy) {
+                CircularProgressIndicator(
+                    color = Color.White,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier
+                        .size(24.dp)
+                        .clearAndSetSemantics { stateDescription = READING_IMAGE },
+                )
+            } else {
+                Icon(imageVector = icon, contentDescription = null, tint = Color.White)
             }
         }
         Spacer(modifier = Modifier.height(6.dp))
@@ -455,6 +615,12 @@ private fun ScannerControlButton(
             color = Color.White,
         )
     }
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }
 
 private fun Context.isCameraPermissionGranted(): Boolean =

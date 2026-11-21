@@ -1,18 +1,27 @@
 package com.hari.ftqr.generator
 
 import android.Manifest
+import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.ClipData
+import android.content.ClipDescription
 import android.content.ClipboardManager
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.net.Uri
 import android.os.Build
+import android.os.PersistableBundle
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.consumeWindowInsets
@@ -22,7 +31,10 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -56,8 +68,10 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -72,9 +86,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
@@ -82,22 +102,22 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.math.BigDecimal
 
-enum class QrContentType(val label: String, val icon: ImageVector) {
-    TEXT("Text", Icons.Filled.TextFields),
-    LINK("Link", Icons.Filled.Link),
-    WIFI("Wi-Fi", Icons.Filled.Wifi),
-    CONTACT("Contact", Icons.Filled.Person),
-    PHONE("Phone", Icons.Filled.Phone),
-    EMAIL("Email", Icons.Filled.Email),
-    SMS("SMS", Icons.Filled.Sms),
-    UPI("UPI payment", Icons.Filled.CurrencyRupee),
+enum class QrContentType(val label: String, val icon: ImageVector, val spokenName: String) {
+    TEXT("Text", Icons.Filled.TextFields, "text"),
+    LINK("Link", Icons.Filled.Link, "link"),
+    WIFI("Wi-Fi", Icons.Filled.Wifi, "Wi-Fi network"),
+    CONTACT("Contact", Icons.Filled.Person, "contact"),
+    PHONE("Phone", Icons.Filled.Phone, "phone number"),
+    EMAIL("Email", Icons.Filled.Email, "email"),
+    SMS("SMS", Icons.Filled.Sms, "SMS"),
+    UPI("UPI payment", Icons.Filled.CurrencyRupee, "UPI payment"),
 }
 
 private data class PayloadResult(val payload: String, val error: String? = null)
@@ -105,7 +125,8 @@ private data class PayloadResult(val payload: String, val error: String? = null)
 private data class QrPreview(val payload: String, val bitmap: Bitmap)
 
 private val wifiSecurityOptions = listOf(
-    QrPayloads.SECURITY_WPA to "WPA/WPA2",
+    QrPayloads.SECURITY_WPA to "WPA2",
+    QrPayloads.SECURITY_WPA3 to "WPA3",
     QrPayloads.SECURITY_WEP to "WEP",
     QrPayloads.SECURITY_NONE to "None",
 )
@@ -159,8 +180,9 @@ fun GeneratorScreen(onBack: () -> Unit) {
             wifiSsid.isBlank() -> PayloadResult("")
             wifiSecurity != QrPayloads.SECURITY_NONE && wifiPassword.isEmpty() ->
                 PayloadResult("", "Enter the network password")
-            wifiSecurity == QrPayloads.SECURITY_WPA && wifiPassword.length < 8 ->
-                PayloadResult("", "WPA passwords need at least 8 characters")
+            (wifiSecurity == QrPayloads.SECURITY_WPA || wifiSecurity == QrPayloads.SECURITY_WPA3) &&
+                !QrPayloads.isValidWpaPassword(wifiPassword) ->
+                PayloadResult("", "WPA passwords need 8 to 63 characters, or 64 hex digits")
             else -> PayloadResult(QrPayloads.wifi(wifiSsid, wifiPassword, wifiSecurity, wifiHidden))
         }
         QrContentType.CONTACT -> when {
@@ -185,12 +207,12 @@ fun GeneratorScreen(onBack: () -> Unit) {
             else -> PayloadResult(QrPayloads.sms(smsNumber, smsMessage))
         }
         QrContentType.UPI -> {
-            val amountValue = upiAmount.trim().toBigDecimalOrNull()
+            val amountError = QrPayloads.upiAmountError(upiAmount)
             when {
                 upiVpa.isBlank() -> PayloadResult("")
-                '@' !in upiVpa -> PayloadResult("", "UPI ID must look like name@bank")
-                upiAmount.isNotBlank() && (amountValue == null || amountValue <= BigDecimal.ZERO) ->
-                    PayloadResult("", "Enter a valid amount")
+                !QrPayloads.isValidUpiId(upiVpa) -> PayloadResult("", "Enter a valid UPI ID, like name@bank")
+                upiName.isBlank() -> PayloadResult("", "Enter the payee name")
+                amountError != null -> PayloadResult("", amountError)
                 else -> PayloadResult(QrPayloads.upi(upiVpa, upiName, upiAmount, upiNote))
             }
         }
@@ -198,24 +220,28 @@ fun GeneratorScreen(onBack: () -> Unit) {
     val payload = result.payload
 
     var preview by remember { mutableStateOf<QrPreview?>(null) }
-    var encodeFailed by remember { mutableStateOf(false) }
+    var failedPayload by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(payload) {
+        failedPayload = null
         if (payload.isBlank()) {
             preview = null
-            encodeFailed = false
             return@LaunchedEffect
         }
         delay(200)
         val bitmap = withContext(Dispatchers.Default) {
-            runCatching { QrEncoder.encode(payload) }.getOrNull()
+            runCatching { QrEncoder.encodePreview(payload) }.getOrNull()
         }
-        preview = bitmap?.let { QrPreview(payload, it) }
-        encodeFailed = bitmap == null
+        if (bitmap == null) {
+            preview = null
+            failedPayload = payload
+        } else {
+            preview = QrPreview(payload, bitmap)
+        }
     }
 
     val current = preview?.takeIf { it.payload == payload && payload.isNotBlank() }
-    val isGenerating = payload.isNotBlank() && current == null && !encodeFailed
+    val encodeFailed = payload.isNotBlank() && failedPayload == payload
 
     fun showMessage(message: String) {
         scope.launch {
@@ -224,10 +250,39 @@ fun GeneratorScreen(onBack: () -> Unit) {
         }
     }
 
+    fun showPermissionSettingsMessage() {
+        scope.launch {
+            snackbarHostState.currentSnackbarData?.dismiss()
+            val result = snackbarHostState.showSnackbar(
+                message = "Storage permission is off. Allow it in Settings to save images",
+                actionLabel = "Settings",
+                duration = SnackbarDuration.Long,
+            )
+            if (result == SnackbarResult.ActionPerformed) {
+                val intent = Intent(
+                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.fromParts("package", context.packageName, null),
+                ).apply {
+                    if (context.findActivity() == null) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                try {
+                    context.startActivity(intent)
+                } catch (e: ActivityNotFoundException) {
+                    showMessage("Couldn't open Settings")
+                }
+            }
+        }
+    }
+
+    suspend fun renderExport(target: QrPreview): Bitmap? = withContext(Dispatchers.Default) {
+        runCatching { QrEncoder.encode(target.payload) }.getOrNull()
+    }
+
     fun saveCurrent() {
         val target = current ?: return
         scope.launch {
-            val uri = ImageExport.saveToGallery(context, target.bitmap)
+            val bitmap = renderExport(target)
+            val uri = bitmap?.let { ImageExport.saveToGallery(context, it) }
             showMessage(if (uri != null) "Saved to Pictures/FTQR" else "Couldn't save the image")
         }
     }
@@ -235,7 +290,16 @@ fun GeneratorScreen(onBack: () -> Unit) {
     val storagePermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
-        if (granted) saveCurrent() else showMessage("Storage permission is needed to save images")
+        when {
+            granted -> saveCurrent()
+            context.findActivity()?.let { activity ->
+                !ActivityCompat.shouldShowRequestPermissionRationale(
+                    activity,
+                    Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                )
+            } == true -> showPermissionSettingsMessage()
+            else -> showMessage("Storage permission is needed to save images")
+        }
     }
 
     Scaffold(
@@ -258,16 +322,15 @@ fun GeneratorScreen(onBack: () -> Unit) {
                 .consumeWindowInsets(innerPadding)
                 .imePadding()
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 12.dp),
+                .padding(vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
+            LazyRow(
+                modifier = Modifier.fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                QrContentType.entries.forEach { option ->
+                items(QrContentType.entries) { option ->
                     FilterChip(
                         selected = type == option,
                         onClick = { type = option },
@@ -283,313 +346,357 @@ fun GeneratorScreen(onBack: () -> Unit) {
                 }
             }
 
-            when (type) {
-                QrContentType.TEXT -> {
-                    FormField(
-                        value = text,
-                        onValueChange = { text = it },
-                        label = "Text",
-                        capitalization = KeyboardCapitalization.Sentences,
-                        imeAction = ImeAction.Default,
-                        singleLine = false,
-                        minLines = 4,
-                    )
-                }
-                QrContentType.LINK -> {
-                    FormField(
-                        value = link,
-                        onValueChange = { link = it },
-                        label = "Website link",
-                        placeholder = "example.com",
-                        keyboardType = KeyboardType.Uri,
-                        imeAction = ImeAction.Done,
-                    )
-                }
-                QrContentType.WIFI -> {
-                    FormField(
-                        value = wifiSsid,
-                        onValueChange = { wifiSsid = it },
-                        label = "Network name (SSID)",
-                    )
-                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                        wifiSecurityOptions.forEachIndexed { index, (value, label) ->
-                            SegmentedButton(
-                                selected = wifiSecurity == value,
-                                onClick = { wifiSecurity = value },
-                                shape = SegmentedButtonDefaults.itemShape(index = index, count = wifiSecurityOptions.size),
-                            ) {
-                                Text(label, maxLines = 1)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                when (type) {
+                    QrContentType.TEXT -> {
+                        FormField(
+                            value = text,
+                            onValueChange = { text = it },
+                            label = "Text",
+                            capitalization = KeyboardCapitalization.Sentences,
+                            imeAction = ImeAction.Default,
+                            singleLine = false,
+                            minLines = 4,
+                        )
+                    }
+                    QrContentType.LINK -> {
+                        FormField(
+                            value = link,
+                            onValueChange = { link = it },
+                            label = "Website link",
+                            placeholder = "example.com",
+                            keyboardType = KeyboardType.Uri,
+                            imeAction = ImeAction.Done,
+                        )
+                    }
+                    QrContentType.WIFI -> {
+                        FormField(
+                            value = wifiSsid,
+                            onValueChange = { wifiSsid = it },
+                            label = "Network name (SSID)",
+                        )
+                        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                            wifiSecurityOptions.forEachIndexed { index, (value, label) ->
+                                SegmentedButton(
+                                    selected = wifiSecurity == value,
+                                    onClick = { wifiSecurity = value },
+                                    shape = SegmentedButtonDefaults.itemShape(index = index, count = wifiSecurityOptions.size),
+                                ) {
+                                    Text(label, maxLines = 1)
+                                }
                             }
                         }
-                    }
-                    if (wifiSecurity != QrPayloads.SECURITY_NONE) {
-                        FormField(
-                            value = wifiPassword,
-                            onValueChange = { wifiPassword = it },
-                            label = "Password",
-                            keyboardType = KeyboardType.Password,
-                            imeAction = ImeAction.Done,
-                            visualTransformation = if (passwordVisible) {
-                                VisualTransformation.None
-                            } else {
-                                PasswordVisualTransformation()
-                            },
-                            trailingIcon = {
-                                IconButton(onClick = { passwordVisible = !passwordVisible }) {
-                                    Icon(
-                                        if (passwordVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                                        contentDescription = if (passwordVisible) "Hide password" else "Show password",
-                                    )
-                                }
-                            },
-                        )
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            "Hidden network",
-                            modifier = Modifier.weight(1f),
-                            style = MaterialTheme.typography.bodyLarge,
-                        )
-                        Switch(checked = wifiHidden, onCheckedChange = { wifiHidden = it })
-                    }
-                }
-                QrContentType.CONTACT -> {
-                    FormField(
-                        value = contactName,
-                        onValueChange = { contactName = it },
-                        label = "Full name",
-                        capitalization = KeyboardCapitalization.Words,
-                    )
-                    FormField(
-                        value = contactPhone,
-                        onValueChange = { contactPhone = it },
-                        label = "Phone",
-                        keyboardType = KeyboardType.Phone,
-                    )
-                    FormField(
-                        value = contactEmail,
-                        onValueChange = { contactEmail = it },
-                        label = "Email",
-                        keyboardType = KeyboardType.Email,
-                    )
-                    FormField(
-                        value = contactOrg,
-                        onValueChange = { contactOrg = it },
-                        label = "Organization",
-                        capitalization = KeyboardCapitalization.Words,
-                    )
-                    FormField(
-                        value = contactWebsite,
-                        onValueChange = { contactWebsite = it },
-                        label = "Website",
-                        keyboardType = KeyboardType.Uri,
-                        imeAction = ImeAction.Done,
-                    )
-                }
-                QrContentType.PHONE -> {
-                    FormField(
-                        value = phone,
-                        onValueChange = { phone = it },
-                        label = "Phone number",
-                        keyboardType = KeyboardType.Phone,
-                        imeAction = ImeAction.Done,
-                    )
-                }
-                QrContentType.EMAIL -> {
-                    FormField(
-                        value = emailTo,
-                        onValueChange = { emailTo = it },
-                        label = "To",
-                        keyboardType = KeyboardType.Email,
-                    )
-                    FormField(
-                        value = emailSubject,
-                        onValueChange = { emailSubject = it },
-                        label = "Subject",
-                        capitalization = KeyboardCapitalization.Sentences,
-                    )
-                    FormField(
-                        value = emailBody,
-                        onValueChange = { emailBody = it },
-                        label = "Message",
-                        capitalization = KeyboardCapitalization.Sentences,
-                        imeAction = ImeAction.Default,
-                        singleLine = false,
-                        minLines = 3,
-                    )
-                }
-                QrContentType.SMS -> {
-                    FormField(
-                        value = smsNumber,
-                        onValueChange = { smsNumber = it },
-                        label = "Phone number",
-                        keyboardType = KeyboardType.Phone,
-                    )
-                    FormField(
-                        value = smsMessage,
-                        onValueChange = { smsMessage = it },
-                        label = "Message",
-                        capitalization = KeyboardCapitalization.Sentences,
-                        imeAction = ImeAction.Default,
-                        singleLine = false,
-                        minLines = 3,
-                    )
-                }
-                QrContentType.UPI -> {
-                    FormField(
-                        value = upiVpa,
-                        onValueChange = { upiVpa = it },
-                        label = "UPI ID",
-                        placeholder = "name@bank",
-                        keyboardType = KeyboardType.Email,
-                    )
-                    FormField(
-                        value = upiName,
-                        onValueChange = { upiName = it },
-                        label = "Payee name",
-                        capitalization = KeyboardCapitalization.Words,
-                    )
-                    FormField(
-                        value = upiAmount,
-                        onValueChange = { value -> upiAmount = value.filter { it.isDigit() || it == '.' } },
-                        label = "Amount (INR, optional)",
-                        keyboardType = KeyboardType.Decimal,
-                    )
-                    FormField(
-                        value = upiNote,
-                        onValueChange = { upiNote = it },
-                        label = "Note (optional)",
-                        capitalization = KeyboardCapitalization.Sentences,
-                        imeAction = ImeAction.Done,
-                    )
-                }
-            }
-
-            val visibleError = result.error?.takeIf { type != QrContentType.LINK || link.isNotEmpty() }
-            if (visibleError != null) {
-                Text(
-                    visibleError,
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            }
-
-            Spacer(Modifier.size(4.dp))
-
-            Card(
-                modifier = Modifier
-                    .align(Alignment.CenterHorizontally)
-                    .size(280.dp),
-                shape = RoundedCornerShape(24.dp),
-                colors = CardDefaults.cardColors(containerColor = Color.White),
-                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(12.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    val shown = current ?: preview
-                    when {
-                        payload.isBlank() -> Text(
-                            "Fill in the details to see your QR code",
-                            color = Color.Gray,
-                            textAlign = TextAlign.Center,
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.padding(16.dp),
-                        )
-                        encodeFailed -> Text(
-                            "This content is too long for a QR code",
-                            color = Color(0xFFB3261E),
-                            textAlign = TextAlign.Center,
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.padding(16.dp),
-                        )
-                        shown != null -> {
-                            val imageBitmap = remember(shown.bitmap) { shown.bitmap.asImageBitmap() }
-                            Image(
-                                bitmap = imageBitmap,
-                                contentDescription = "QR code preview",
-                                modifier = Modifier.fillMaxSize(),
+                        if (wifiSecurity != QrPayloads.SECURITY_NONE) {
+                            FormField(
+                                value = wifiPassword,
+                                onValueChange = { wifiPassword = it },
+                                label = "Password",
+                                keyboardType = KeyboardType.Password,
+                                imeAction = ImeAction.Done,
+                                visualTransformation = if (passwordVisible) {
+                                    VisualTransformation.None
+                                } else {
+                                    PasswordVisualTransformation()
+                                },
+                                trailingIcon = {
+                                    IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                                        Icon(
+                                            if (passwordVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                            contentDescription = if (passwordVisible) "Hide password" else "Show password",
+                                        )
+                                    }
+                                },
                             )
                         }
-                        isGenerating -> CircularProgressIndicator(color = Color.Black)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .toggleable(
+                                    value = wifiHidden,
+                                    role = Role.Switch,
+                                    onValueChange = { wifiHidden = it },
+                                )
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                "Hidden network",
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                            Switch(checked = wifiHidden, onCheckedChange = null)
+                        }
+                    }
+                    QrContentType.CONTACT -> {
+                        FormField(
+                            value = contactName,
+                            onValueChange = { contactName = it },
+                            label = "Full name",
+                            capitalization = KeyboardCapitalization.Words,
+                        )
+                        FormField(
+                            value = contactPhone,
+                            onValueChange = { contactPhone = it },
+                            label = "Phone",
+                            keyboardType = KeyboardType.Phone,
+                        )
+                        FormField(
+                            value = contactEmail,
+                            onValueChange = { contactEmail = it },
+                            label = "Email",
+                            keyboardType = KeyboardType.Email,
+                        )
+                        FormField(
+                            value = contactOrg,
+                            onValueChange = { contactOrg = it },
+                            label = "Organization",
+                            capitalization = KeyboardCapitalization.Words,
+                        )
+                        FormField(
+                            value = contactWebsite,
+                            onValueChange = { contactWebsite = it },
+                            label = "Website",
+                            keyboardType = KeyboardType.Uri,
+                            imeAction = ImeAction.Done,
+                        )
+                    }
+                    QrContentType.PHONE -> {
+                        FormField(
+                            value = phone,
+                            onValueChange = { phone = it },
+                            label = "Phone number",
+                            keyboardType = KeyboardType.Phone,
+                            imeAction = ImeAction.Done,
+                        )
+                    }
+                    QrContentType.EMAIL -> {
+                        FormField(
+                            value = emailTo,
+                            onValueChange = { emailTo = it },
+                            label = "To",
+                            keyboardType = KeyboardType.Email,
+                        )
+                        FormField(
+                            value = emailSubject,
+                            onValueChange = { emailSubject = it },
+                            label = "Subject",
+                            capitalization = KeyboardCapitalization.Sentences,
+                        )
+                        FormField(
+                            value = emailBody,
+                            onValueChange = { emailBody = it },
+                            label = "Message",
+                            capitalization = KeyboardCapitalization.Sentences,
+                            imeAction = ImeAction.Default,
+                            singleLine = false,
+                            minLines = 3,
+                        )
+                    }
+                    QrContentType.SMS -> {
+                        FormField(
+                            value = smsNumber,
+                            onValueChange = { smsNumber = it },
+                            label = "Phone number",
+                            keyboardType = KeyboardType.Phone,
+                        )
+                        FormField(
+                            value = smsMessage,
+                            onValueChange = { smsMessage = it },
+                            label = "Message",
+                            capitalization = KeyboardCapitalization.Sentences,
+                            imeAction = ImeAction.Default,
+                            singleLine = false,
+                            minLines = 3,
+                        )
+                    }
+                    QrContentType.UPI -> {
+                        FormField(
+                            value = upiVpa,
+                            onValueChange = { upiVpa = it },
+                            label = "UPI ID",
+                            placeholder = "name@bank",
+                            keyboardType = KeyboardType.Email,
+                        )
+                        FormField(
+                            value = upiName,
+                            onValueChange = { upiName = it },
+                            label = "Payee name",
+                            capitalization = KeyboardCapitalization.Words,
+                        )
+                        FormField(
+                            value = upiAmount,
+                            onValueChange = { value -> upiAmount = QrPayloads.filterUpiAmountInput(upiAmount, value) },
+                            label = "Amount (INR, optional)",
+                            keyboardType = KeyboardType.Decimal,
+                        )
+                        FormField(
+                            value = upiNote,
+                            onValueChange = { upiNote = it },
+                            label = "Note (optional)",
+                            capitalization = KeyboardCapitalization.Sentences,
+                            imeAction = ImeAction.Done,
+                        )
                     }
                 }
-            }
 
-            val ready = current != null
+                val visibleError = result.error?.takeIf { type != QrContentType.LINK || link.isNotEmpty() }
+                if (visibleError != null) {
+                    Text(
+                        visibleError,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                    )
+                }
 
-            Button(
-                onClick = {
-                    val target = current ?: return@Button
-                    scope.launch {
-                        if (!ImageExport.shareImage(context, target.bitmap)) {
-                            showMessage("Couldn't share the image")
-                        }
-                    }
-                },
-                enabled = ready,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Icon(
-                    Icons.Filled.Share,
-                    contentDescription = null,
-                    modifier = Modifier.size(ButtonDefaults.IconSize),
-                )
-                Spacer(Modifier.width(ButtonDefaults.IconSpacing))
-                Text("Share")
-            }
+                Spacer(Modifier.size(4.dp))
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                OutlinedButton(
-                    onClick = {
-                        val needsPermission = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
-                            ContextCompat.checkSelfPermission(
-                                context,
-                                Manifest.permission.WRITE_EXTERNAL_STORAGE,
-                            ) != PackageManager.PERMISSION_GRANTED
-                        if (needsPermission) {
-                            storagePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-                        } else {
-                            saveCurrent()
-                        }
-                    },
-                    enabled = ready,
-                    modifier = Modifier.weight(1f),
+                Card(
+                    modifier = Modifier
+                        .align(Alignment.CenterHorizontally)
+                        .size(280.dp),
+                    shape = RoundedCornerShape(24.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color.White),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
                 ) {
-                    Text("Save to gallery", maxLines = 1)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(12.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        val shown = current ?: preview
+                        val stale = current == null
+                        when {
+                            payload.isBlank() -> Text(
+                                "Fill in the details to see your QR code",
+                                color = Color.Gray,
+                                textAlign = TextAlign.Center,
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.padding(16.dp),
+                            )
+                            encodeFailed -> Text(
+                                "This content is too long for a QR code",
+                                color = Color(0xFFB3261E),
+                                textAlign = TextAlign.Center,
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.padding(16.dp),
+                            )
+                            shown != null -> {
+                                val imageBitmap = remember(shown.bitmap) { shown.bitmap.asImageBitmap() }
+                                Image(
+                                    bitmap = imageBitmap,
+                                    contentDescription = "QR code for ${type.spokenName}",
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = ContentScale.Fit,
+                                    alpha = if (stale) 0.3f else 1f,
+                                    filterQuality = FilterQuality.None,
+                                )
+                                if (stale) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(32.dp),
+                                        color = Color.Black,
+                                        strokeWidth = 3.dp,
+                                    )
+                                }
+                            }
+                            else -> CircularProgressIndicator(color = Color.Black)
+                        }
+                    }
                 }
-                OutlinedButton(
+
+                val ready = current != null
+
+                Button(
                     onClick = {
-                        val target = current ?: return@OutlinedButton
-                        val clipboard = context.getSystemService(ClipboardManager::class.java)
-                        if (clipboard == null) {
-                            showMessage("Clipboard unavailable")
-                        } else {
-                            clipboard.setPrimaryClip(ClipData.newPlainText("QR content", target.payload))
-                            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-                                showMessage("Copied to clipboard")
+                        val target = current ?: return@Button
+                        scope.launch {
+                            val bitmap = renderExport(target)
+                            if (bitmap == null || !ImageExport.shareImage(context, bitmap)) {
+                                showMessage("Couldn't share the image")
                             }
                         }
                     },
                     enabled = ready,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text("Copy text", maxLines = 1)
+                    Icon(
+                        Icons.Filled.Share,
+                        contentDescription = null,
+                        modifier = Modifier.size(ButtonDefaults.IconSize),
+                    )
+                    Spacer(Modifier.width(ButtonDefaults.IconSpacing))
+                    Text("Share")
                 }
-            }
 
-            Spacer(Modifier.size(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            val needsPermission = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
+                                ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                                ) != PackageManager.PERMISSION_GRANTED
+                            if (needsPermission) {
+                                storagePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                            } else {
+                                saveCurrent()
+                            }
+                        },
+                        enabled = ready,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("Save to gallery", maxLines = 1)
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            val target = current ?: return@OutlinedButton
+                            val clipboard = context.getSystemService(ClipboardManager::class.java)
+                            if (clipboard == null) {
+                                showMessage("Clipboard unavailable")
+                            } else {
+                                val clip = ClipData.newPlainText("QR content", target.payload)
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                                    target.payload.startsWith("WIFI:")
+                                ) {
+                                    clip.description.extras = PersistableBundle().apply {
+                                        putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
+                                    }
+                                }
+                                clipboard.setPrimaryClip(clip)
+                                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                                    showMessage("Copied to clipboard")
+                                }
+                            }
+                        },
+                        enabled = ready,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("Copy text", maxLines = 1)
+                    }
+                }
+
+                Spacer(Modifier.size(8.dp))
+            }
         }
     }
+}
+
+private fun Context.findActivity(): Activity? {
+    var ctx: Context? = this
+    while (ctx is ContextWrapper) {
+        if (ctx is Activity) return ctx
+        ctx = ctx.baseContext
+    }
+    return null
 }
 
 @Composable

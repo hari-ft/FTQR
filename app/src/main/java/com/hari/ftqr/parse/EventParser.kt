@@ -87,6 +87,47 @@ internal object EventParser {
         }.getOrNull()
     }
 
-    private fun zoneFor(timeZoneId: String?): ZoneId =
-        timeZoneId?.let { runCatching { ZoneId.of(it) }.getOrNull() } ?: ZoneId.systemDefault()
+    internal fun zoneFor(timeZoneId: String?): ZoneId =
+        timeZoneId?.trim()?.trim('"')?.takeIf { it.isNotEmpty() }?.let(::resolveZone) ?: ZoneId.systemDefault()
+
+    private fun resolveZone(id: String): ZoneId? {
+        zoneOrNull(id)?.let { return it }
+        windowsZones[id.lowercase()]?.let { return zoneOrNull(it) }
+        val segments = id.split('/').map { it.trim() }.filter { it.isNotEmpty() }
+        for (count in minOf(3, segments.size) downTo 1) {
+            val candidate = segments.takeLast(count).joinToString("/")
+            zoneOrNull(candidate)?.let { return it }
+            windowsZones[candidate.lowercase()]?.let { mapped -> zoneOrNull(mapped)?.let { return it } }
+        }
+        return null
+    }
+
+    private fun zoneOrNull(id: String): ZoneId? = runCatching { ZoneId.of(id) }.getOrNull()
+
+    private val windowsZones: Map<String, String> = mapOf(
+        "India Standard Time" to "Asia/Kolkata",
+        "UTC" to "UTC",
+        "Coordinated Universal Time" to "UTC",
+        "GMT Standard Time" to "Europe/London",
+        "Greenwich Standard Time" to "Atlantic/Reykjavik",
+        "Pacific Standard Time" to "America/Los_Angeles",
+        "Mountain Standard Time" to "America/Denver",
+        "Central Standard Time" to "America/Chicago",
+        "Eastern Standard Time" to "America/New_York",
+        "W. Europe Standard Time" to "Europe/Berlin",
+        "Romance Standard Time" to "Europe/Paris",
+        "Central Europe Standard Time" to "Europe/Budapest",
+        "Central European Standard Time" to "Europe/Warsaw",
+        "Singapore Standard Time" to "Asia/Singapore",
+        "China Standard Time" to "Asia/Shanghai",
+        "Tokyo Standard Time" to "Asia/Tokyo",
+        "AUS Eastern Standard Time" to "Australia/Sydney",
+        "Arabian Standard Time" to "Asia/Dubai",
+        "Arab Standard Time" to "Asia/Riyadh",
+        "SE Asia Standard Time" to "Asia/Bangkok",
+        "Sri Lanka Standard Time" to "Asia/Colombo",
+        "Nepal Standard Time" to "Asia/Kathmandu",
+        "Bangladesh Standard Time" to "Asia/Dhaka",
+        "Pakistan Standard Time" to "Asia/Karachi",
+    ).mapKeys { it.key.lowercase() }
 }
