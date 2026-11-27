@@ -9,13 +9,13 @@ plugins {
 val versionFile = rootProject.file("version.properties")
 if (!versionFile.isFile) throw GradleException("version.properties is missing: expected major/minor/patch")
 val versionProps = Properties().apply { versionFile.inputStream().use { load(it) } }
-fun versionPart(key: String, max: Int) = versionProps.getProperty(key)?.trim()?.toIntOrNull()?.takeIf { it in 0..max }
-    ?: throw GradleException("version.properties: '$key' must be a number from 0 to $max")
+fun versionPart(key: String, max: Int) = versionProps.getProperty(key)?.trim()?.toIntOrNull()?.takeIf { it in 1..max }
+    ?: throw GradleException("version.properties: '$key' must be a number from 1 to $max")
 val major = versionPart("major", 99)
 val minor = versionPart("minor", 9)
 val patch = versionPart("patch", 9)
 val appVersionName = "$major.$minor.$patch"
-val appVersionCode = major * 1_000_000 + minor * 1_000 + patch
+val appVersionCode = major * 100 + minor * 10 + patch
 
 val signingProps = Properties().apply {
     rootProject.file("keystore.properties").takeIf { it.isFile }?.inputStream()?.use { load(it) }
@@ -162,8 +162,8 @@ fun registerBump(name: String, next: Triple<Int, Int, Int>) = tasks.register(nam
 }
 registerBump("bumpPatch", when {
     patch < 9 -> Triple(major, minor, patch + 1)
-    minor < 9 -> Triple(major, minor + 1, 0)
-    else -> Triple(major + 1, 0, 0)
+    minor < 9 -> Triple(major, minor + 1, 1)
+    else -> Triple(major + 1, 1, 1)
 })
-registerBump("bumpMinor", if (minor < 9) Triple(major, minor + 1, 0) else Triple(major + 1, 0, 0))
-registerBump("bumpMajor", Triple(major + 1, 0, 0))
+registerBump("bumpMinor", if (minor < 9) Triple(major, minor + 1, 1) else Triple(major + 1, 1, 1))
+registerBump("bumpMajor", Triple(major + 1, 1, 1))

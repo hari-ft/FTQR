@@ -87,12 +87,12 @@ Then run:
 Each output folder keeps the 3 most recent builds and deletes older ones.
 
 ### Versioning
-The version is stored in `version.properties` as `major.minor.patch`, with these limits: major 0–99, minor 0–9, patch 0–9. The `versionCode` is calculated from it as `major × 1,000,000 + minor × 1,000 + patch`.
+The version is stored in `version.properties` as `major.minor.patch`, with these limits: major 1–99, minor 1–9, patch 1–9. The `versionCode` is calculated from it as `major × 100 + minor × 10 + patch`, so 1.1.1 is 111. Bump the patch for every build you hand over.
 
 ```powershell
-.\gradlew bumpPatch    # 1.0.0 -> 1.0.1 (rolls over to the next minor after .9)
-.\gradlew bumpMinor    # 1.0.5 -> 1.1.0
-.\gradlew bumpMajor    # 1.4.2 -> 2.0.0
+.\gradlew bumpPatch    # 1.1.1 -> 1.1.2 (after .9 it rolls to the next minor: 1.1.9 -> 1.2.1)
+.\gradlew bumpMinor    # 1.1.5 -> 1.2.1 (after minor 9 it rolls to the next major: 1.9.4 -> 2.1.1)
+.\gradlew bumpMajor    # 1.4.2 -> 2.1.1
 ```
 
 ### Release signing
